@@ -1,0 +1,401 @@
+# rotate_keys.yaml — Service definitions and scan settings for rotate_keys.py
+# Copy this file next to rotate_keys.py and edit as needed.
+
+# ---------------------------------------------------------------------------
+# Filesystem scan settings
+# ---------------------------------------------------------------------------
+search_dirs:
+  - /mnt/user/appdata
+  - /boot/config
+
+search_exts:
+  - .yaml
+  - .yml
+  - .json
+  - .conf
+  - .config
+  - .xml
+  - .ini
+  - .env
+  - .toml
+  - .cfg
+
+skip_dirs:
+  - logs
+  - log
+  - cache
+  - Cache
+  - Backups
+  - backup
+  - MediaCover
+  - metadata
+  - .git
+  - Crash Reports
+  - node_modules
+  - __pycache__
+  - venv
+  - site-packages
+  - dist
+  - build
+  - media
+  - transcodes
+  - thumbnails
+  - previews
+  - Metadata
+  - Plug-in Support
+  - databases
+  - tv
+  - movies
+  - music
+  - photos
+  - downloads
+
+# ---------------------------------------------------------------------------
+# Remote hosts to also search/replace (SSH key auth required)
+# ---------------------------------------------------------------------------
+remote_hosts:
+  - label: TrueNAS
+    host: 192.168.1.122
+    user: root
+    search_dirs:
+      - /mnt/Data/appdata
+    db_refs:
+      - ["/mnt/Data/appdata/prowlarr/prowlarr.db", "Applications", "Settings"]
+      - ["/mnt/Data/appdata/prowlarr/prowlarr.db", "Indexers", "Settings"]
+
+# ---------------------------------------------------------------------------
+# Named DB reference groups (referenced by services below)
+# ---------------------------------------------------------------------------
+db_ref_groups:
+  arr_indexer:
+    - ["/mnt/user/appdata/sonarr/sonarr.db", "Indexers", "Settings"]
+    - ["/mnt/user/appdata/radarr/radarr.db", "Indexers", "Settings"]
+    - ["/mnt/user/appdata/lidarr/lidarr.db", "Indexers", "Settings"]
+    - ["/mnt/user/appdata/readarr/readarr.db", "Indexers", "Settings"]
+  arr_dlclient:
+    - ["/mnt/user/appdata/sonarr/sonarr.db", "DownloadClients", "Settings"]
+    - ["/mnt/user/appdata/radarr/radarr.db", "DownloadClients", "Settings"]
+    - ["/mnt/user/appdata/lidarr/lidarr.db", "DownloadClients", "Settings"]
+    - ["/mnt/user/appdata/readarr/readarr.db", "DownloadClients", "Settings"]
+  prowlarr_apps:
+    - ["/mnt/user/appdata/prowlarr/prowlarr.db", "Applications", "Settings"]
+  bazarr:
+    - ["/mnt/user/appdata/bazarr/db/bazarr.db", "system", "configured"]
+
+# ---------------------------------------------------------------------------
+# Service registry
+# ---------------------------------------------------------------------------
+# auto_fetch can be omitted, or set to:
+#   type: arr_xml
+#   path: /mnt/user/appdata/SONAME/config.xml
+#
+# db_refs can reference named groups above (e.g. "arr_indexer") or list
+# raw tuples inline.
+services:
+  sonarr:
+    display_name: Sonarr
+    env_var: SONARR_API_KEY
+    settings_url: http://192.168.1.104:8989/settings/general
+    auto_fetch:
+      type: arr_xml
+      path: /mnt/user/appdata/sonarr/config.xml
+    db_refs:
+      - prowlarr_apps
+
+  radarr:
+    display_name: Radarr
+    env_var: RADARR_API_KEY
+    settings_url: http://192.168.1.104:7878/settings/general
+    auto_fetch:
+      type: arr_xml
+      path: /mnt/user/appdata/radarr/config.xml
+    db_refs:
+      - prowlarr_apps
+
+  lidarr:
+    display_name: Lidarr
+    env_var: LIDARR_API_KEY
+    settings_url: http://192.168.1.104:8686/settings/general
+    auto_fetch:
+      type: arr_xml
+      path: /mnt/user/appdata/lidarr/config.xml
+    db_refs:
+      - prowlarr_apps
+
+  readarr:
+    display_name: Readarr
+    env_var: READARR_API_KEY
+    settings_url: http://192.168.1.104:8787/settings/general
+    auto_fetch:
+      type: arr_xml
+      path: /mnt/user/appdata/readarr/config.xml
+    db_refs:
+      - prowlarr_apps
+
+  prowlarr:
+    display_name: Prowlarr
+    env_var: PROWLARR_API_KEY
+    settings_url: http://192.168.1.122:9696/settings/general
+    auto_fetch:
+      type: arr_xml
+      path: /mnt/user/appdata/prowlarr/config.xml
+    db_refs:
+      - arr_indexer
+    note: After rotating, each *arr app needs its Prowlarr indexer updated — this script handles it automatically via the SQLite DB.
+
+  overseerr:
+    display_name: Overseerr
+    env_var: OVERSEERR_API_KEY
+    settings_url: http://192.168.1.104:5055/settings
+
+  bazarr:
+    display_name: Bazarr
+    env_var: BAZARR_API_KEY
+    settings_url: http://192.168.1.104:6767/settings/general
+
+  jackett:
+    display_name: Jackett
+    env_var: JACKETT_API_KEY
+    settings_url: http://192.168.1.122:9117/UI/Dashboard
+    db_refs:
+      - arr_indexer
+
+  autobrr:
+    display_name: Autobrr
+    env_var: AUTOBRR_API_KEY
+    settings_url: http://192.168.1.104:7474/settings/api
+
+  slskd:
+    display_name: Slskd
+    env_var: SLSKD_API_KEY
+    settings_url: http://192.168.1.104:5035/settings
+
+  whisparr:
+    display_name: Whisparr
+    env_var: WHISPARR_API_KEY
+    settings_url: http://192.168.1.104:6969/settings/general
+    auto_fetch:
+      type: arr_xml
+      path: /mnt/user/appdata/whisparr/config.xml
+
+  plex:
+    display_name: Plex
+    env_var: PLEX_TOKEN
+    settings_url: https://app.plex.tv/desktop/#!/settings/account
+    note: Plex tokens are personal account tokens. Low priority — skip unless you believe it was actually used maliciously.
+
+  tautulli:
+    display_name: Tautulli
+    env_var: TAUTULLI_API_KEY
+    settings_url: http://192.168.1.104:8189/settings
+
+  jellyfin:
+    display_name: Jellyfin
+    env_var: JELLYFIN_API_KEY
+    settings_url: http://192.168.1.104:8096
+    note: API keys are under Dashboard > Advanced > API Keys.
+
+  emby:
+    display_name: Emby
+    env_var: EMBY_API_KEY
+    settings_url: ""
+    note: API keys are under Server > Advanced > API Keys. Verify the host:port in your setup.
+
+  jellyseerr:
+    display_name: Jellyseerr
+    env_var: JELLYSEERR_API_KEY
+    settings_url: ""
+    note: API keys are under Settings > Jellyseerr. Verify the host:port in your setup.
+
+  navidrome:
+    display_name: Navidrome
+    env_var: NAVIDROME_TOKEN
+    settings_url: http://192.168.1.104:4533
+    note: Also set NAVIDROME_USER. Create a new token in Profile > Change Password > Tokens.
+
+  audiobookshelf:
+    display_name: Audiobookshelf
+    env_var: AUDIOBOOKSHELF_API_KEY
+    settings_url: http://192.168.1.104:13378
+    note: Create API tokens under Settings > Users > (user) > API Tokens.
+
+  sabnzbd:
+    display_name: SABnzbd
+    env_var: SABNZBD_API_KEY
+    settings_url: http://192.168.1.122:10097/sabnzbd/config/general/
+    db_refs:
+      - arr_dlclient
+
+  qbittorrent:
+    display_name: qBittorrent password
+    env_var: QBITTORRENT_PASSWORD
+    settings_url: http://192.168.1.122:10095/
+    db_refs:
+      - arr_dlclient
+    note: Change password in qBittorrent WebUI Options > Web UI > Password.
+    bitwarden:
+      item_name: qBittorrent Web UI
+
+  deluge:
+    display_name: Deluge
+    env_var: DELUGE_PASSWORD
+    settings_url: ""
+    db_refs:
+      - arr_dlclient
+    note: Change WebUI password in Preferences > Interface. Verify the host:port in your setup.
+    bitwarden:
+      item_name: Deluge Web UI
+
+  transmission:
+    display_name: Transmission
+    env_var: TRANSMISSION_PASSWORD
+    settings_url: ""
+    db_refs:
+      - arr_dlclient
+    note: Also set TRANSMISSION_USERNAME. Change RPC password in settings.json or via the Web UI. Verify the host:port in your setup.
+    bitwarden:
+      item_name: Transmission Web UI
+
+  npm:
+    display_name: Nginx Proxy Manager  ← DO THIS FIRST (public VPS)
+    env_var: NPM_PASSWORD
+    settings_url: http://172.245.73.170:81
+    note: This is internet-facing. Highest priority.
+    bitwarden:
+      item_name: Nginx Proxy Manager
+
+  pangolin:
+    display_name: Pangolin
+    env_var: PANGOLIN_API_KEY
+    settings_url: https://pancakefarts.site/admin/api-keys
+
+  miniflux:
+    display_name: Miniflux
+    env_var: MINIFLUX_API_KEY
+    settings_url: https://mini.pancakefarts.xyz/keys
+
+  traefik:
+    display_name: Traefik
+    env_var: ""
+    settings_url: https://traefik.pancakefarts.site
+    note: No secret key to rotate.
+
+  gluetun_unraid:
+    display_name: Gluetun (Unraid)
+    env_var: GLUETUN_UNRAID_API_KEY
+    settings_url: ""
+    note: Edit HTTP_CONTROL_SERVER_API_KEY in the Gluetun container's env vars, then restart.
+
+  gluetun_truenas:
+    display_name: Gluetun (TrueNAS)
+    env_var: GLUETUN_TRUENAS_API_KEY
+    settings_url: ""
+    note: Edit HTTP_CONTROL_SERVER_API_KEY in the Gluetun container's env vars, then restart.
+
+  homebridge:
+    display_name: Homebridge password
+    env_var: HOMEBRIDGE_PASSWORD
+    settings_url: http://192.168.1.104:8581
+    note: Change under User Accounts in Homebridge settings.
+    bitwarden:
+      item_name: Homebridge
+
+  immich:
+    display_name: Immich
+    env_var: IMMICH_API_KEY
+    settings_url: http://192.168.1.104:2283/user-settings?isOpen=api-keys
+
+  truenas:
+    display_name: TrueNAS
+    env_var: TRUENAS_API_KEY
+    settings_url: http://192.168.1.122/ui/apikeys
+    note: Delete the old key and create a new one.
+
+  unifi_os:
+    display_name: UniFi OS
+    env_var: UNIFI_OS_API_KEY
+    settings_url: https://192.168.1.89:11443/proxy/network/integrations
+
+  unifi_ucg:
+    display_name: UniFi UCG
+    env_var: UNIFI_UCG_API_KEY
+    settings_url: https://192.168.1.1/proxy/network/integrations
+
+  qnap:
+    display_name: QNAP password
+    env_var: QNAP_PASSWORD
+    settings_url: https://192.168.1.168
+    bitwarden:
+      item_name: QNAP NAS
+
+  nut:
+    display_name: NUT/Peanut password
+    env_var: NUT_PASSWORD
+    settings_url: ""
+    note: Update in the NUT server config and in all services that reference it.
+    bitwarden:
+      item_name: NUT Server
+
+  komga:
+    display_name: Komga
+    env_var: KOMGA_PASSWORD
+    settings_url: ""
+    note: Also set KOMGA_USERNAME. Change password in Server Settings > Authentication. Verify the host:port in your setup.
+    bitwarden:
+      item_name: Komga
+
+  kavita:
+    display_name: Kavita
+    env_var: KAVITA_API_KEY
+    settings_url: ""
+    note: API keys are under User Dashboard > 3rd Party Clients. Verify the host:port in your setup.
+
+  mylar:
+    display_name: Mylar
+    env_var: MYLAR_API_KEY
+    settings_url: ""
+    note: API key is under Configuration > Web Interface. Verify the host:port in your setup.
+
+  nextcloud:
+    display_name: Nextcloud
+    env_var: NEXTCLOUD_PASSWORD
+    settings_url: ""
+    note: Also set NEXTCLOUD_USERNAME. Change password via User Settings > Security. Verify the host:port in your setup.
+    bitwarden:
+      item_name: Nextcloud
+
+  syncthing:
+    display_name: Syncthing
+    env_var: SYNCTHING_API_KEY
+    settings_url: http://192.168.1.104:8384
+    auto_fetch:
+      type: xml_tag
+      path: /mnt/user/appdata/syncthing/config.xml
+      tag: apikey
+    note: API key is in Settings > GUI.
+
+  adguard:
+    display_name: AdGuard Home
+    env_var: ADGUARD_PASSWORD
+    settings_url: ""
+    note: Also set ADGUARD_USERNAME. Change password in Settings > General Settings > Web interface. Verify the host:port in your setup.
+    bitwarden:
+      item_name: AdGuard Home
+
+  pihole:
+    display_name: Pi-hole
+    env_var: PIHOLE_API_KEY
+    settings_url: ""
+    note: API token is under Settings > API > Show API token. Verify the host:port in your setup.
+
+  portainer:
+    display_name: Portainer
+    env_var: PORTAINER_API_KEY
+    settings_url: ""
+    note: Also set PORTAINER_ENV. Create API keys under My Account > API keys. Verify the host:port in your setup.
+
+  uptimekuma:
+    display_name: Uptime Kuma
+    env_var: UPTIMEKUMA_API_KEY
+    settings_url: ""
+    note: Also set UPTIMEKUMA_SLUG. API keys are under Settings > API Keys. Verify the host:port in your setup.
