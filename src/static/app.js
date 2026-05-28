@@ -338,11 +338,90 @@ async function deleteSshKey(id) {
   }
 }
 
+async function loadBwStatus() {
+  const badge = document.getElementById('bw-status-badge');
+  const text = document.getElementById('bw-status-text');
+  const unlockBtn = document.getElementById('btn-bw-unlock');
+  const lockBtn = document.getElementById('btn-bw-lock');
+  if (!badge) return;
+  try {
+    const res = await fetch('/api/bitwarden/status');
+    const data = await res.json();
+    if (!data.available) {
+      badge.textContent = 'Not installed';
+      badge.className = 'badge stale';
+      text.textContent = 'Bitwarden CLI is not installed in the container.';
+      unlockBtn.style.display = 'none';
+      lockBtn.style.display = 'none';
+    } else if (data.unlocked) {
+      badge.textContent = 'Unlocked';
+      badge.className = 'badge ok';
+      text.textContent = 'Vault is unlocked (' + (data.source === 'memory' ? 'session in memory' : 'session from env') + ').';
+      unlockBtn.style.display = 'none';
+      lockBtn.style.display = 'inline-block';
+    } else {
+      badge.textContent = 'Locked';
+      badge.className = 'badge stale';
+      text.textContent = 'Vault is locked. Unlock to sync rotated secrets.';
+      unlockBtn.style.display = 'inline-block';
+      lockBtn.style.display = 'none';
+    }
+  } catch (e) {
+    badge.textContent = 'Error';
+    badge.className = 'badge stale';
+    text.textContent = 'Could not check Bitwarden status.';
+  }
+}
+
+function openBwModal() {
+  document.getElementById('bw-master-password').value = '';
+  document.getElementById('bw-modal-result').textContent = '';
+  document.getElementById('bw-modal').showModal();
+}
+
+function closeBwModal() {
+  document.getElementById('bw-modal').close();
+}
+
+async function submitBwUnlock(event) {
+  event.preventDefault();
+  const password = document.getElementById('bw-master-password').value;
+  const resultPre = document.getElementById('bw-modal-result');
+  resultPre.textContent = 'Unlocking...';
+  const form = new FormData();
+  form.append('master_password', password);
+  try {
+    const res = await fetch('/api/bitwarden/unlock', { method: 'POST', body: form });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      resultPre.textContent = 'Unlocked successfully.';
+      setTimeout(() => { closeBwModal(); loadBwStatus(); }, 800);
+    } else {
+      resultPre.textContent = 'Error: ' + (data.detail || 'Unlock failed');
+    }
+  } catch (e) {
+    resultPre.textContent = 'Error: ' + e.message;
+  }
+}
+
+async function lockBitwarden() {
+  if (!confirm('Clear the in-memory Bitwarden session?')) return;
+  try {
+    const res = await fetch('/api/bitwarden/lock', { method: 'POST' });
+    const data = await res.json();
+    if (data.success) loadBwStatus();
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+}
+
 // Initial load (page-aware)
 if (document.getElementById('services-container')) {
   loadServices();
   loadScanStatus();
+  loadBwStatus();
   setInterval(loadScanStatus, 30000);
+  setInterval(loadBwStatus, 30000);
 }
 if (document.getElementById('hosts-container')) {
   loadHosts();

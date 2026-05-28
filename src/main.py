@@ -33,6 +33,7 @@ from src.ssh_keys import delete_ssh_key, generate_ssh_key
 scan_index: Optional[ScanIndex] = None
 last_scan_time: Optional[datetime] = None
 scan_in_progress: bool = False
+_bw_session: Optional[str] = None
 
 # ---------------------------------------------------------------------------
 # Auth helpers
@@ -59,6 +60,12 @@ def require_auth(request: Request):
         raise HTTPException(status_code=303, detail="/login")
 
 
+def get_bw_session() -> Optional[str]:
+    if _bw_session:
+        return _bw_session
+    return bw_get_session()
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------
@@ -81,10 +88,6 @@ app.add_middleware(SessionMiddleware, secret_key=settings.secret_key, max_age=36
 app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
-
-# ---------------------------------------------------------------------------
-# Seed services into DB from YAML
-# ---------------------------------------------------------------------------
 
 def _db_host_to_dict(row: RemoteHost) -> dict:
     return {
@@ -240,6 +243,39 @@ async def dashboard(request: Request):
 # API
 # ---------------------------------------------------------------------------
 
+@app.get("/api/bitwarden/status")
+async def api_bw_status(request: Request):
+    require_auth(request)
+    available = bw_available()
+    session = get_bw_session()
+    return {
+        "available": available,
+        "unlocked": bool(session),
+        "source": "memory" if _bw_session else ("env" if session else None),
+    }
+
+
+@app.post("/api/bitwarden/unlock")
+async def api_bw_unlock(request: Request, master_password: str = Form(...)):
+    require_auth(request)
+    global _bw_session
+    if not bw_available():
+        raise HTTPException(status_code=503, detail="Bitwarden CLI not installed")
+    session = bw_unlock(master_password)
+    if not session:
+        raise HTTPException(status_code=403, detail="Unlock failed — check your master password")
+    _bw_session = session
+    return {"success": True, "message": "Bitwarden unlocked"}
+
+
+@app.post("/api/bitwarden/lock")
+async def api_bw_lock(request: Request):
+    require_auth(request)
+    global _bw_session
+    _bw_session = None
+    return {"success": True, "message": "Bitwarden session cleared"}
+
+
 @app.get("/api/services")
 async def api_services(request: Request):
     require_auth(request)
@@ -299,13 +335,7 @@ async def api_rotate(
     if not scan_index:
         scan_index = build_scan_index(services, env, env_path=settings.env_file, remote_hosts=db_hosts)
 
-    bw_session = None
-    if sync_bitwarden_flag and bw_available():
-        bw_session = bw_get_session()
-        if not bw_session:
-            bw_password = os.environ.get("BW_PASSWORD", "").strip()
-            if bw_password:
-                bw_session = bw_unlock(bw_password)
+    bw_session = get_bw_session() if sync_bitwarden_flag and bw_available() else None
 
     rotation_log = {}
     ok = rotate(
@@ -355,13 +385,7 @@ async def api_rotate_all(
     if not scan_index:
         scan_index = build_scan_index(services, env, env_path=settings.env_file, remote_hosts=db_hosts)
 
-    bw_session = None
-    if sync_bitwarden_flag and bw_available():
-        bw_session = bw_get_session()
-        if not bw_session:
-            bw_password = os.environ.get("BW_PASSWORD", "").strip()
-            if bw_password:
-                bw_session = bw_unlock(bw_password)
+    bw_session = get_bw_session() if sync_bitwarden_flag and bw_available() else None
 
     results = []
     for sid, svc in services.items():

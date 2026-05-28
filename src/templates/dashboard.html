@@ -26,10 +26,44 @@
   </div>
 </div>
 
+<div id="bw-status-card" class="grid" style="margin-bottom: 1rem;">
+  <article>
+    <header>
+      <h4>Bitwarden</h4>
+      <span id="bw-status-badge" class="badge">Checking...</span>
+    </header>
+    <p id="bw-status-text">Checking Bitwarden status...</p>
+    <footer>
+      <button id="btn-bw-unlock" class="secondary outline" onclick="openBwModal()">Unlock</button>
+      <button id="btn-bw-lock" class="secondary outline" onclick="lockBitwarden()" style="display:none;">Lock</button>
+    </footer>
+  </article>
+</div>
+
 <div id="services-container">
   <!-- Populated by JS -->
   <article aria-busy="true"></article>
 </div>
+
+<!-- Bitwarden Unlock Modal -->
+<dialog id="bw-modal">
+  <article>
+    <header>
+      <button aria-label="Close" rel="prev" onclick="closeBwModal()"></button>
+      <h3>Unlock Bitwarden</h3>
+    </header>
+    <form id="bw-form" onsubmit="submitBwUnlock(event)">
+      <label>
+        Master password
+        <input type="password" id="bw-master-password" name="master_password" placeholder="Your Bitwarden master password" required>
+      </label>
+      <footer>
+        <button type="submit" class="primary">Unlock</button>
+      </footer>
+    </form>
+    <pre id="bw-modal-result"></pre>
+  </article>
+</dialog>
 
 <!-- Rotate Modal -->
 <dialog id="rotate-modal">

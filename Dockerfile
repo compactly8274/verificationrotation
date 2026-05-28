@@ -7,7 +7,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ssh \
     openssh-client \
+    unzip \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Bitwarden CLI
+RUN curl -L -o /tmp/bw.zip "https://github.com/bitwarden/clients/releases/download/cli-v2024.12.0/bw-linux-2024.12.0.zip" \
+    && unzip -o /tmp/bw.zip -d /usr/local/bin/ \
+    && chmod +x /usr/local/bin/bw \
+    && rm /tmp/bw.zip
 
 # Install Python dependencies
 COPY requirements.txt .
