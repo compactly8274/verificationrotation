@@ -59,6 +59,11 @@ class ScanIndex:
     local_dbs: dict[str, list[str]]
     remote_files: dict[str, dict[str, list[str]]]
     remote_dbs: dict[str, dict[str, list[str]]]
+    scan_errors: list[str] = None  # type: ignore[assignment]
+
+    def __post_init__(self):
+        if self.scan_errors is None:
+            self.scan_errors = []
 
 
 def _keys_fingerprint(keys: set[str]) -> str:
@@ -231,12 +236,17 @@ print(json.dumps(index))
 """
     rc, out, err = _ssh(host, user, f"python3 -c {__import__('shlex').quote(py)}", timeout=180, key_path=key_path)
     if rc != 0:
-        print(f"  WARNING: remote file scan on {host} failed: {err or 'ssh error'}")
-        return {k: [] for k in active}
+        error_msg = err or "ssh error"
+        print(f"  WARNING: remote file scan on {host} failed: {error_msg}")
+        sentinel: dict[str, list[str]] = {k: [] for k in active}
+        sentinel["__scan_error__"] = [f"{host}: {error_msg}"]
+        return sentinel
     try:
         return json.loads(out)
-    except Exception:
-        return {k: [] for k in active}
+    except Exception as exc:
+        sentinel = {k: [] for k in active}
+        sentinel["__scan_error__"] = [f"{host}: invalid JSON response — {exc}"]
+        return sentinel
 
 
 def scan_remote_dbs_for_keys(host: str, user: str, db_refs: list, keys: set[str], key_path: Optional[Path] = None) -> dict[str, list[str]]:
@@ -271,12 +281,17 @@ print(json.dumps(result))
 """
     rc, out, err = _ssh(host, user, f"python3 -c {__import__('shlex').quote(py)}", timeout=60, key_path=key_path)
     if rc != 0:
-        print(f"  WARNING: remote DB scan on {host} failed: {err or 'ssh error'}")
-        return {k: [] for k in active}
+        error_msg = err or "ssh error"
+        print(f"  WARNING: remote DB scan on {host} failed: {error_msg}")
+        sentinel: dict[str, list[str]] = {k: [] for k in active}
+        sentinel["__scan_error__"] = [f"{host}: {error_msg}"]
+        return sentinel
     try:
         return json.loads(out)
-    except Exception:
-        return {k: [] for k in active}
+    except Exception as exc:
+        sentinel = {k: [] for k in active}
+        sentinel["__scan_error__"] = [f"{host}: invalid JSON response — {exc}"]
+        return sentinel
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +369,7 @@ def build_scan_index(
 
     remote_files: dict[str, dict[str, list[str]]] = {}
     remote_dbs: dict[str, dict[str, list[str]]] = {}
+    scan_errors: list[str] = []
     if not skip_remote:
         for rh in remote_hosts:
             label = rh["label"]
@@ -364,16 +380,22 @@ def build_scan_index(
                 with _Spinner(f"Scanning {label} databases ({rh['host']})"):
                     rd = scan_remote_dbs_for_keys(rh["host"], rh["user"], rh["db_refs"], old_keys, key_path=key_path)
                 print(f"  ✓ {label} DB scan complete.", flush=True)
+                # Extract and remove error sentinels before storing
+                for d, tag in ((rf, "__scan_error__"), (rd, "__scan_error__")):
+                    if tag in d:
+                        scan_errors.extend(d.pop(tag))
                 remote_files[label] = rf
                 remote_dbs[label] = rd
             except subprocess.TimeoutExpired:
-                print(f"  ✗ {label} timed out — skipping.")
+                msg = f"{label} ({rh['host']}): timed out"
+                print(f"  ✗ {msg}")
+                scan_errors.append(msg)
                 remote_files[label] = {k: [] for k in old_keys}
                 remote_dbs[label] = {k: [] for k in old_keys}
     else:
         print("  Skipping remote hosts.")
 
-    index = ScanIndex(local_files, local_dbs, remote_files, remote_dbs)
+    index = ScanIndex(local_files, local_dbs, remote_files, remote_dbs, scan_errors=scan_errors)
     save_scan_cache(index, old_keys, cp)
     total = sum(len(v) for v in local_files.values())
     print(f"\n  Index ready — {total} local hit(s). Results cached to {cp}\n")

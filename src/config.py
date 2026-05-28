@@ -28,6 +28,14 @@ class Settings(BaseSettings):
     # Scanning
     scan_interval_minutes: int = Field(default=360, alias="SCAN_INTERVAL_MINUTES")
     cache_max_age_hours: float = Field(default=4.0, alias="CACHE_MAX_AGE_HOURS")
+    scan_timeout_minutes: int = Field(default=30, alias="SCAN_TIMEOUT_MINUTES")
+
+    # Auto-rotation (0 = disabled)
+    auto_rotate_interval_hours: float = Field(default=0.0, alias="AUTO_ROTATE_INTERVAL_HOURS")
+
+    # Notifications
+    webhook_url: str = Field(default="", alias="WEBHOOK_URL")
+    webhook_type: str = Field(default="generic", alias="WEBHOOK_TYPE")  # generic, discord, slack, gotify
 
     # Docker
     docker_socket: Path = Field(default=Path("/var/run/docker.sock"), alias="DOCKER_SOCKET")

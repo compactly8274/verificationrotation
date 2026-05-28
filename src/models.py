@@ -46,6 +46,7 @@ class ScanLog(Base):
     files_scanned = Column(Integer, default=0)
     keys_found = Column(Integer, default=0)
     status = Column(String, default="pending")  # pending, running, completed, failed
+    error_message = Column(Text, nullable=True)
 
 
 class RemoteHost(Base):
