@@ -237,6 +237,107 @@ async function deleteHost(id) {
   }
 }
 
+// SSH Keys page functions
+async function loadSshKeys() {
+  const container = document.getElementById('ssh-keys-container');
+  if (!container) return;
+  container.innerHTML = '<article aria-busy="true"></article>';
+  try {
+    const res = await fetch('/api/ssh-keys');
+    const keys = await res.json();
+    renderSshKeys(keys);
+  } catch (e) {
+    container.innerHTML = '<p style="color:red">Failed to load SSH keys.</p>';
+  }
+}
+
+function renderSshKeys(keys) {
+  const container = document.getElementById('ssh-keys-container');
+  if (!keys.length) {
+    container.innerHTML = '<p>No SSH keys generated yet. Generate one to get started.</p>';
+    return;
+  }
+  let html = '<table><thead><tr><th>Name</th><th>Public Key</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
+  for (const k of keys) {
+    html += `
+      <tr data-id="${k.id}" data-name="${k.name}" data-public="${k.public_key.replace(/"/g, '&quot;')}">
+        <td>${k.name}</td>
+        <td><code>${k.public_key.slice(0, 40)}...</code></td>
+        <td>${new Date(k.created_at).toLocaleString()}</td>
+        <td>
+          <button class="secondary outline" onclick="showSshKeyFromRow(this.closest('tr'))">Show</button>
+          <button class="secondary outline" onclick="deleteSshKey(${k.id})">Delete</button>
+        </td>
+      </tr>
+    `;
+  }
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+function openSshKeyModal() {
+  document.getElementById('ssh-key-name').value = '';
+  document.getElementById('ssh-key-modal-result').textContent = '';
+  document.getElementById('ssh-key-display').style.display = 'none';
+  document.getElementById('ssh-key-modal-title').textContent = 'Generate SSH Key';
+  document.getElementById('ssh-key-modal').showModal();
+}
+
+function closeSshKeyModal() {
+  document.getElementById('ssh-key-modal').close();
+}
+
+function showSshKeyFromRow(row) {
+  openSshKeyModal();
+  document.getElementById('ssh-key-modal-title').textContent = row.dataset.name;
+  document.getElementById('ssh-key-display').style.display = 'block';
+  document.getElementById('ssh-key-public').value = row.dataset.public;
+}
+
+function copyPublicKey() {
+  const ta = document.getElementById('ssh-key-public');
+  ta.select();
+  navigator.clipboard.writeText(ta.value);
+}
+
+async function submitSshKey(event) {
+  event.preventDefault();
+  const name = document.getElementById('ssh-key-name').value;
+  const resultPre = document.getElementById('ssh-key-modal-result');
+  const displayDiv = document.getElementById('ssh-key-display');
+  resultPre.textContent = 'Generating...';
+  displayDiv.style.display = 'none';
+
+  const form = new FormData();
+  form.append('name', name);
+
+  try {
+    const res = await fetch('/api/ssh-keys', { method: 'POST', body: form });
+    const data = await res.json();
+    if (data.success) {
+      resultPre.textContent = 'Key generated successfully.';
+      document.getElementById('ssh-key-public').value = data.public_key;
+      displayDiv.style.display = 'block';
+      loadSshKeys();
+    } else {
+      resultPre.textContent = 'Error: ' + (data.detail || 'unknown');
+    }
+  } catch (e) {
+    resultPre.textContent = 'Error: ' + e.message;
+  }
+}
+
+async function deleteSshKey(id) {
+  if (!confirm('Delete this key?')) return;
+  try {
+    const res = await fetch(`/api/ssh-keys/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.success) loadSshKeys();
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+}
+
 // Initial load (page-aware)
 if (document.getElementById('services-container')) {
   loadServices();
@@ -245,4 +346,7 @@ if (document.getElementById('services-container')) {
 }
 if (document.getElementById('hosts-container')) {
   loadHosts();
+}
+if (document.getElementById('ssh-keys-container')) {
+  loadSshKeys();
 }

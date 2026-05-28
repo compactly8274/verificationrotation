@@ -21,10 +21,11 @@ from src.bitwarden import bw_available, bw_get_session, bw_unlock
 from src.config import settings
 from src.database import async_session, init_db
 from src.env_manager import read_env
-from src.models import RemoteHost, RotationHistory, ScanLog, Service
+from src.models import RemoteHost, RotationHistory, ScanLog, Service, SSHKey
 from src.rotator import generate_password, is_password_service, rotate
 from src.scanner import ScanIndex, build_scan_index
 from src.services_registry import ServiceDef, load_rotate_keys_config
+from src.ssh_keys import delete_ssh_key, generate_ssh_key
 
 # ---------------------------------------------------------------------------
 # Globals
@@ -478,6 +479,61 @@ async def api_hosts_delete(request: Request, host_id: int):
         row = result.scalar_one_or_none()
         if not row:
             raise HTTPException(status_code=404, detail="Host not found")
+        await session.delete(row)
+        await session.commit()
+    return {"success": True}
+
+
+@app.get("/ssh-keys", response_class=HTMLResponse)
+async def ssh_keys_page(request: Request):
+    if not is_authenticated(request):
+        return RedirectResponse(url="/login", status_code=303)
+    return templates.TemplateResponse("ssh_keys.html", {"request": request})
+
+
+@app.get("/api/ssh-keys")
+async def api_ssh_keys(request: Request):
+    require_auth(request)
+    async with async_session() as session:
+        result = await session.execute(select(SSHKey))
+        rows = result.scalars().all()
+        return [
+            {
+                "id": r.id,
+                "name": r.name,
+                "public_key": r.public_key,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
+
+
+@app.post("/api/ssh-keys")
+async def api_ssh_keys_create(request: Request, name: str = Form(...)):
+    require_auth(request)
+    try:
+        public_key, private_path = generate_ssh_key(name)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    async with async_session() as session:
+        session.add(SSHKey(
+            name=name,
+            public_key=public_key,
+            private_key_path=private_path,
+        ))
+        await session.commit()
+    return {"success": True, "public_key": public_key}
+
+
+@app.delete("/api/ssh-keys/{key_id}")
+async def api_ssh_keys_delete(request: Request, key_id: int):
+    require_auth(request)
+    async with async_session() as session:
+        result = await session.execute(select(SSHKey).where(SSHKey.id == key_id))
+        row = result.scalar_one_or_none()
+        if not row:
+            raise HTTPException(status_code=404, detail="Key not found")
+        delete_ssh_key(row.name)
         await session.delete(row)
         await session.commit()
     return {"success": True}

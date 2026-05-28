@@ -177,17 +177,19 @@ def scan_dbs_for_keys(key_db_refs: dict[str, list]) -> dict[str, list[str]]:
 # Remote scanning (SSH)
 # ---------------------------------------------------------------------------
 
-def _ssh(host: str, user: str, cmd: str, timeout: int = 60) -> tuple[int, str, str]:
-    result = subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
-         "-o", "StrictHostKeyChecking=accept-new",
-         f"{user}@{host}", cmd],
-        capture_output=True, text=True, timeout=timeout,
-    )
+def _ssh(host: str, user: str, cmd: str, timeout: int = 60, key_path: Optional[Path] = None) -> tuple[int, str, str]:
+    ssh_args = [
+        "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+        "-o", "StrictHostKeyChecking=accept-new",
+    ]
+    if key_path:
+        ssh_args += ["-i", str(key_path)]
+    ssh_args += [f"{user}@{host}", cmd]
+    result = subprocess.run(ssh_args, capture_output=True, text=True, timeout=timeout)
     return result.returncode, result.stdout.strip(), result.stderr.strip()
 
 
-def scan_remote_files_for_keys(host: str, user: str, search_dirs: list, search_exts: set, skip_dirs: set, keys: set[str]) -> dict[str, list[str]]:
+def scan_remote_files_for_keys(host: str, user: str, search_dirs: list, search_exts: set, skip_dirs: set, keys: set[str], key_path: Optional[Path] = None) -> dict[str, list[str]]:
     active = [k for k in keys if k]
     if not active:
         return {}
@@ -227,7 +229,7 @@ for base in {search_dirs!r}:
                         index[k].append(s)
 print(json.dumps(index))
 """
-    rc, out, err = _ssh(host, user, f"python3 -c {__import__('shlex').quote(py)}", timeout=180)
+    rc, out, err = _ssh(host, user, f"python3 -c {__import__('shlex').quote(py)}", timeout=180, key_path=key_path)
     if rc != 0:
         print(f"  WARNING: remote file scan on {host} failed: {err or 'ssh error'}")
         return {k: [] for k in active}
@@ -237,7 +239,7 @@ print(json.dumps(index))
         return {k: [] for k in active}
 
 
-def scan_remote_dbs_for_keys(host: str, user: str, db_refs: list, keys: set[str]) -> dict[str, list[str]]:
+def scan_remote_dbs_for_keys(host: str, user: str, db_refs: list, keys: set[str], key_path: Optional[Path] = None) -> dict[str, list[str]]:
     active = [k for k in keys if k]
     if not active or not db_refs:
         return {k: [] for k in active}
@@ -267,7 +269,7 @@ for db_path, table, col in DB_REFS:
         pass
 print(json.dumps(result))
 """
-    rc, out, err = _ssh(host, user, f"python3 -c {__import__('shlex').quote(py)}", timeout=60)
+    rc, out, err = _ssh(host, user, f"python3 -c {__import__('shlex').quote(py)}", timeout=60, key_path=key_path)
     if rc != 0:
         print(f"  WARNING: remote DB scan on {host} failed: {err or 'ssh error'}")
         return {k: [] for k in active}
@@ -316,6 +318,7 @@ def build_scan_index(
     cache_max_age: float = 4.0,
     no_cache: bool = False,
     remote_hosts: Optional[list[dict]] = None,
+    key_path: Optional[Path] = None,
 ) -> ScanIndex:
     search_dirs, search_exts, skip_dirs, yaml_hosts, _ = load_rotate_keys_config(Path("rotate_keys.yaml"))
     if remote_hosts is None:
@@ -356,10 +359,10 @@ def build_scan_index(
             label = rh["label"]
             try:
                 with _Spinner(f"Scanning {label} files ({rh['host']})"):
-                    rf = scan_remote_files_for_keys(rh["host"], rh["user"], rh["search_dirs"], search_exts, skip_dirs, old_keys)
+                    rf = scan_remote_files_for_keys(rh["host"], rh["user"], rh["search_dirs"], search_exts, skip_dirs, old_keys, key_path=key_path)
                 print(f"  ✓ {label} file scan complete.", flush=True)
                 with _Spinner(f"Scanning {label} databases ({rh['host']})"):
-                    rd = scan_remote_dbs_for_keys(rh["host"], rh["user"], rh["db_refs"], old_keys)
+                    rd = scan_remote_dbs_for_keys(rh["host"], rh["user"], rh["db_refs"], old_keys, key_path=key_path)
                 print(f"  ✓ {label} DB scan complete.", flush=True)
                 remote_files[label] = rf
                 remote_dbs[label] = rd

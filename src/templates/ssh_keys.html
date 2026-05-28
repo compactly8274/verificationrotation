@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+
+{% block title %}SSH Keys — VerificationRotation{% endblock %}
+
+{% block content %}
+<nav>
+  <ul>
+    <li><strong>VerificationRotation</strong></li>
+    <li><a href="/">Dashboard</a></li>
+    <li><a href="/hosts">Remote Hosts</a></li>
+  </ul>
+  <ul>
+    <li><a href="/logout" role="button" class="secondary outline">Logout</a></li>
+  </ul>
+</nav>
+
+<h2>SSH Keys</h2>
+<p>Generate key pairs for remote host authentication. Copy the public key to your target server's <code>~/.ssh/authorized_keys</code>.</p>
+
+<button class="primary" onclick="openSshKeyModal()">Generate Key</button>
+
+<div id="ssh-keys-container">
+  <article aria-busy="true"></article>
+</div>
+
+<dialog id="ssh-key-modal">
+  <article>
+    <header>
+      <button aria-label="Close" rel="prev" onclick="closeSshKeyModal()"></button>
+      <h3 id="ssh-key-modal-title">Generate SSH Key</h3>
+    </header>
+    <form id="ssh-key-form" onsubmit="submitSshKey(event)">
+      <label>
+        Key name
+        <input type="text" id="ssh-key-name" name="name" placeholder="truenas-root" required>
+      </label>
+      <footer>
+        <button type="submit" class="primary">Generate</button>
+      </footer>
+    </form>
+    <pre id="ssh-key-modal-result"></pre>
+    <div id="ssh-key-display" style="display:none; margin-top:1rem;">
+      <label>Public key <small>(paste into remote server's authorized_keys)</small>
+        <textarea id="ssh-key-public" rows="3" readonly onclick="this.select()"></textarea>
+      </label>
+      <button class="secondary outline" onclick="copyPublicKey()">Copy to clipboard</button>
+    </div>
+  </article>
+</dialog>
+{% endblock %}

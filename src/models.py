@@ -58,3 +58,13 @@ class RemoteHost(Base):
     search_dirs = Column(Text, nullable=False, default="[]")  # JSON list
     db_refs = Column(Text, nullable=False, default="[]")     # JSON list of tuples
     created_at = Column(DateTime, server_default=func.now())
+
+
+class SSHKey(Base):
+    __tablename__ = "ssh_keys"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String, nullable=False, unique=True)
+    public_key = Column(Text, nullable=False)
+    private_key_path = Column(String, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
