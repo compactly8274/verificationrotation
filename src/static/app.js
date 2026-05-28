@@ -10,6 +10,8 @@ async function loadServices() {
   }
 }
 
+let _autoRotateEnabled = false;
+
 function renderServices(services) {
   const container = document.getElementById('services-container');
   if (!services.length) {
@@ -18,14 +20,17 @@ function renderServices(services) {
   }
   let html = '<div class="grid">';
   for (const svc of services) {
-    const statusClass = svc.status;
     const ageText = svc.age_days !== null ? `${svc.age_days}d ago` : 'never';
-    const staleWarning = svc.status === 'stale' ? ' <span class="badge stale">stale</span>' : '';
+    const isStale = svc.status === 'stale';
+    const staleWarning = isStale ? ' <span class="badge stale">stale</span>' : '';
+    const autoScheduled = isStale && _autoRotateEnabled
+      ? ' <span class="badge" style="background:#2980b9;color:#fff;font-size:.7em">scheduled</span>'
+      : '';
     html += `
       <article class="service-card">
         <header>
           <div>
-            <h4><span class="status-dot ${statusClass}"></span>${svc.display_name}${staleWarning}</h4>
+            <h4><span class="status-dot ${svc.status}"></span>${svc.display_name}${staleWarning}${autoScheduled}</h4>
             <small class="hit-count">Refs: ${svc.hit_count} | Last rotated: ${ageText}</small>
           </div>
           <div>
@@ -46,18 +51,39 @@ async function loadScanStatus() {
     const data = await res.json();
     const badge = document.getElementById('scan-status-badge');
     const lastScan = document.getElementById('last-scan');
+    const autoInd = document.getElementById('auto-rotating-indicator');
+    const errorBanner = document.getElementById('scan-error-banner');
+
+    // Auto-rotation spinner
+    if (autoInd) autoInd.style.display = data.auto_rotation_running ? 'inline' : 'none';
+
+    // Sync auto-rotate flag so service cards can show "scheduled" badge
+    _autoRotateEnabled = !!(data.auto_rotate_hours && data.auto_rotate_hours > 0);
+
+    // Scan badge
     if (data.in_progress) {
       badge.textContent = 'Scanning...';
       badge.className = 'badge';
     } else if (data.last_scan) {
       const d = new Date(data.last_scan);
       const mins = Math.floor((Date.now() - d) / 60000);
-      badge.textContent = mins < 60 ? `${mins}m ago` : `${Math.floor(mins/60)}h ago`;
-      badge.className = 'badge ok';
+      const hasErrors = data.scan_errors && data.scan_errors.length > 0;
+      badge.textContent = (mins < 60 ? `${mins}m ago` : `${Math.floor(mins/60)}h ago`) + (hasErrors ? ' ⚠' : '');
+      badge.className = hasErrors ? 'badge' : 'badge ok';
       lastScan.textContent = `Last scan: ${d.toLocaleString()}`;
     } else {
       badge.textContent = 'No scan yet';
       badge.className = 'badge';
+    }
+
+    // Scan error banner
+    if (errorBanner) {
+      if (data.scan_errors && data.scan_errors.length > 0) {
+        errorBanner.innerHTML = '<strong>Scan errors:</strong> ' + data.scan_errors.map(e => `<div>⚠ ${e}</div>`).join('');
+        errorBanner.style.display = 'block';
+      } else {
+        errorBanner.style.display = 'none';
+      }
     }
   } catch (e) {
     console.error('scan status error', e);

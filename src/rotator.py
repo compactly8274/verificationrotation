@@ -15,7 +15,8 @@ from typing import Optional
 
 from src.bitwarden import sync_bitwarden
 from src.env_manager import read_env, write_env
-from src.scanner import _key_matches, _key_replace, _ssh
+from src.notifications import send_notification
+from src.scanner import ScanIndex, _key_matches, _key_replace, _ssh, build_scan_index
 from src.services_registry import ServiceDef
 
 
@@ -259,6 +260,88 @@ def log_audit(
 
 
 # ---------------------------------------------------------------------------
+# Post-rotation verification helpers
+# ---------------------------------------------------------------------------
+
+def _rescan_for_key(key: str, file_hits: list[str], db_refs: list, remote_hosts: list[dict], remote_file_hits: dict, remote_db_hits: dict) -> list[str]:
+    """Re-scan all previously-hit locations for the old key. Returns list of paths still containing it."""
+    remaining = []
+    for fp_str in file_hits:
+        fp = Path(fp_str)
+        try:
+            if fp.exists() and _key_matches(key, fp.read_text(errors="ignore")):
+                remaining.append(fp_str)
+        except (PermissionError, OSError):
+            pass
+    for db_path_str, table, col in (db_refs or []):
+        dp = Path(db_path_str)
+        if not dp.exists():
+            continue
+        try:
+            con = sqlite3.connect(f"file:{dp}?mode=ro", uri=True)
+            rows = con.execute(f"SELECT {col} FROM {table}").fetchall()
+            con.close()
+            for (blob,) in rows:
+                if blob and _key_matches(key, blob):
+                    remaining.append(f"{db_path_str} ({table}.{col})")
+                    break
+        except Exception:
+            pass
+    for rh in remote_hosts:
+        label = rh["label"]
+        if not remote_file_hits.get(label) and not remote_db_hits.get(label):
+            continue
+        from src.scanner import scan_remote_files_for_keys, scan_remote_dbs_for_keys
+        from src.services_registry import load_rotate_keys_config
+        from src.config import settings as _s
+        search_dirs, search_exts, skip_dirs, _, _ = load_rotate_keys_config(_s.descriptions_path)
+        rf = scan_remote_files_for_keys(rh["host"], rh["user"], rh["search_dirs"], search_exts, skip_dirs, {key})
+        rd = scan_remote_dbs_for_keys(rh["host"], rh["user"], rh["db_refs"], {key})
+        remaining.extend(rf.get(key, []))
+        remaining.extend(rd.get(key, []))
+    return remaining
+
+
+def _rollback(
+    env_path: Path,
+    env: dict[str, str],
+    svc: "ServiceDef",
+    old_key: str,
+    local_new_key: str,
+    changed_files: list[str],
+    changed_dbs: list[str],
+    backup_dir: Optional[Path],
+    remote_hosts: list[dict],
+) -> None:
+    """Restore files from backup and revert .env to old_key."""
+    print("  ⟳ Rolling back...")
+    if backup_dir:
+        _restore_from_backup(backup_dir, [Path(f) for f in changed_files])
+
+    # Also reverse any DB .bak files
+    for db_path_str, _, _ in (svc.db_refs or []):
+        dp = Path(db_path_str)
+        bak = dp.with_suffix(".db.bak")
+        if bak.exists():
+            shutil.copy2(bak, dp)
+            bak.unlink(missing_ok=True)
+            print(f"  ✓ Restored DB {dp} from backup")
+
+    # Revert in-memory files that may not have backups
+    replace_in_files(local_new_key, old_key, changed_files)
+    replace_in_dbs(local_new_key, old_key, svc.db_refs) if svc.db_refs else []
+
+    # Revert remote
+    for rh in remote_hosts:
+        replace_in_remote_files(rh["host"], rh["user"], local_new_key, old_key, changed_files)
+
+    # Revert .env
+    env[svc.env_var] = old_key
+    write_env(env_path, {svc.env_var: old_key})
+    print("  ✓ Rollback complete — .env restored to old key")
+
+
+# ---------------------------------------------------------------------------
 # Core rotate function
 # ---------------------------------------------------------------------------
 
@@ -294,11 +377,17 @@ def rotate(
     if svc.note:
         print(f"  Note: {svc.note}")
 
+    if remote_hosts is None:
+        from src.services_registry import load_rotate_keys_config
+        _, _, _, remote_hosts, _ = load_rotate_keys_config(env_path.parent / "rotate_keys.yaml")
+
+    # ── Pre-flight health check ───────────────────────────────────────────
     if svc.health_url:
         ok, msg = _health_check(svc.health_url)
         if not ok:
             print(f"  ✗ Pre-flight health check failed: {msg}")
             log_audit(env_path, service_id, _key_hash(old_key), "", 0, 0, False, f"Pre-flight failed: {msg}")
+            send_notification("rotation_failed", svc.display_name, f"Pre-flight health check failed: {msg}", service_id=service_id)
             return False
         print(f"  ✓ Pre-flight health check passed ({msg})")
 
@@ -306,6 +395,8 @@ def rotate(
     db_hits = index.local_dbs.get(old_key, [])
     remote_file_hits = {label: d.get(old_key, []) for label, d in index.remote_files.items() if d.get(old_key)}
     remote_db_hits = {label: d.get(old_key, []) for label, d in index.remote_dbs.items() if d.get(old_key)}
+
+    total_hits = len(file_hits) + len(db_hits) + sum(len(v) for v in remote_file_hits.values()) + sum(len(v) for v in remote_db_hits.values())
 
     if file_hits:
         print(f"  Local text files ({len(file_hits)}):")
@@ -327,6 +418,36 @@ def rotate(
         print("  No references found outside of .env")
 
     has_hits = any([file_hits, db_hits, remote_file_hits, remote_db_hits])
+
+    # ── Pre-flight: abort if key has known hits but scan finds none ───────
+    # Protects against stale scan index returning zero results when the key
+    # genuinely exists in configs — refusing to rotate blind is safer.
+    if non_interactive and not dry_run:
+        from src.database import async_session as _async_session
+        import asyncio
+        from src.models import Service as _Service
+        from sqlalchemy import select as _select
+
+        async def _get_hit_count():
+            try:
+                async with _async_session() as _sess:
+                    row = await _sess.execute(_select(_Service).where(_Service.id == service_id))
+                    svc_row = row.scalar_one_or_none()
+                    return svc_row.hit_count if svc_row else 0
+            except Exception:
+                return 0
+
+        try:
+            known_hits = asyncio.get_event_loop().run_until_complete(_get_hit_count())
+        except RuntimeError:
+            known_hits = 0
+
+        if known_hits > 0 and total_hits == 0:
+            msg = f"Key has {known_hits} known reference(s) but scan found 0 — refusing to rotate (stale index?)"
+            print(f"  ✗ {msg}")
+            log_audit(env_path, service_id, _key_hash(old_key), "", 0, 0, False, msg)
+            send_notification("rotation_failed", svc.display_name, msg, service_id=service_id)
+            return False
 
     if non_interactive:
         if not svc.auto_fetch and (svc.settings_url or has_hits):
@@ -398,13 +519,24 @@ def rotate(
         print(f"  [dry-run] Would update {env_path}  (${svc.env_var})")
         return True
 
-    if backup_dir:
-        for f in file_hits:
-            _backup_file(Path(f), backup_dir)
-        for db_path_str, _, _ in (svc.db_refs or []):
-            dp = Path(db_path_str)
-            if dp.exists():
-                _backup_file(dp, backup_dir)
+    # ── Ensure backup dir exists for rollback ─────────────────────────────
+    if not backup_dir:
+        backup_dir = _backup_dir(env_path)
+
+    for f in file_hits:
+        _backup_file(Path(f), backup_dir)
+    for db_path_str, _, _ in (svc.db_refs or []):
+        dp = Path(db_path_str)
+        if dp.exists():
+            _backup_file(dp, backup_dir)
+
+    send_notification(
+        "rotation_start", svc.display_name,
+        f"Starting rotation for {svc.display_name}",
+        service_id=service_id,
+        files=len(file_hits),
+        dbs=len(db_hits),
+    )
 
     print(f"\n  Replacing in files...")
     changed_files = replace_in_files(old_key, local_new_key, file_hits)
@@ -412,9 +544,6 @@ def rotate(
 
     remote_changed_files: dict[str, list[str]] = {}
     remote_changed_dbs: dict[str, list[str]] = {}
-    if remote_hosts is None:
-        from src.services_registry import load_rotate_keys_config
-        _, _, _, remote_hosts, _ = load_rotate_keys_config(Path("rotate_keys.yaml"))
     for rh in remote_hosts:
         label = rh["label"]
         hits = remote_file_hits.get(label, [])
@@ -452,6 +581,20 @@ def rotate(
     if rotation_log is not None:
         rotation_log[service_id] = time.time()
 
+    # ── Post-rotation verification ────────────────────────────────────────
+    print("  Verifying old key no longer present...")
+    still_present = _rescan_for_key(old_key, file_hits, svc.db_refs, remote_hosts, remote_file_hits, remote_db_hits)
+    if still_present:
+        msg = f"Old key still found in {len(still_present)} location(s) after rotation — rolling back"
+        print(f"  ✗ {msg}")
+        for p in still_present:
+            print(f"    {p}")
+        _rollback(env_path, env, svc, old_key, local_new_key, changed_files, changed_dbs, backup_dir, remote_hosts)
+        log_audit(env_path, service_id, _key_hash(old_key), _key_hash(local_new_key), len(changed_files), len(changed_dbs), False, f"Rolled back: {msg}")
+        send_notification("rotation_rollback", svc.display_name, msg, service_id=service_id, still_present=len(still_present))
+        return False
+    print("  ✓ Post-rotation verification passed — old key absent everywhere")
+
     if svc.health_url:
         ok, msg = _health_check(svc.health_url, expected_key=old_key)
         if not ok:
@@ -462,15 +605,27 @@ def rotate(
     if svc.docker_name:
         restart_docker_container(svc.docker_name)
 
+    # ── Bitwarden sync (failure is fatal when explicitly requested) ───────
     if bw_session and svc.bitwarden:
         bw_ok, bw_msg = sync_bitwarden(svc, local_new_key, bw_session, env)
         if bw_ok:
             print(f"  ✓ {bw_msg}")
         else:
-            print(f"  ⚠ Bitwarden sync skipped: {bw_msg}")
+            print(f"  ✗ Bitwarden sync FAILED: {bw_msg}")
+            log_audit(env_path, service_id, _key_hash(old_key), _key_hash(local_new_key),
+                      len(changed_files), len(changed_dbs), False, f"Bitwarden sync failed: {bw_msg}")
+            send_notification("rotation_failed", svc.display_name, f"Files rotated but Bitwarden sync failed: {bw_msg}", service_id=service_id, files_changed=total)
+            return False
 
     log_audit(env_path, service_id, _key_hash(old_key), _key_hash(local_new_key),
               len(changed_files), len(changed_dbs), True)
+
+    send_notification(
+        "rotation_success", svc.display_name,
+        f"Successfully rotated {svc.display_name}",
+        service_id=service_id,
+        files_changed=total,
+    )
 
     if state is not None:
         state.setdefault("completed", [])

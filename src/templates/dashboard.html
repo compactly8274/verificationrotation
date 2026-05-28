@@ -10,10 +10,20 @@
     <li><a href="/ssh-keys">SSH Keys</a></li>
   </ul>
   <ul>
+    <li id="auto-rotate-badge">
+      {% if auto_rotate_hours and auto_rotate_hours > 0 %}
+        <span class="badge" style="background:var(--pico-primary-background);color:var(--pico-primary-inverse)">Auto-rotation: ON (every {{ auto_rotate_hours|int }}h)</span>
+      {% else %}
+        <span class="badge secondary">Auto-rotation: OFF</span>
+      {% endif %}
+    </li>
+    <li><span id="auto-rotating-indicator" style="display:none"><span aria-busy="true"></span> Auto-rotating…</span></li>
     <li><span id="scan-status-badge" class="badge">Scanning...</span></li>
     <li><a href="/logout" role="button" class="secondary outline">Logout</a></li>
   </ul>
 </nav>
+
+<div id="scan-error-banner" role="alert" style="display:none;background:var(--pico-del-color,#c0392b);color:#fff;padding:.75rem 1rem;border-radius:var(--pico-border-radius);margin-bottom:1rem"></div>
 
 <div class="grid">
   <div>

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
@@ -22,17 +23,43 @@ from src.config import settings
 from src.database import async_session, init_db
 from src.env_manager import read_env
 from src.models import RemoteHost, RotationHistory, ScanLog, Service, SSHKey
+from src.notifications import send_notification
 from src.rotator import generate_password, is_password_service, rotate
 from src.scanner import ScanIndex, build_scan_index
 from src.services_registry import ServiceDef, load_rotate_keys_config
 from src.ssh_keys import delete_ssh_key, generate_ssh_key
+
+logger = logging.getLogger("verificationrotation")
 
 # ---------------------------------------------------------------------------
 # Globals
 # ---------------------------------------------------------------------------
 scan_index: Optional[ScanIndex] = None
 last_scan_time: Optional[datetime] = None
-scan_in_progress: bool = False
+scan_heartbeat: Optional[datetime] = None          # updated every ~5s during scan
+last_scan_errors: list[str] = []                   # errors from most recent scan
+
+rotation_in_progress: Optional[dict] = None        # {service_id, started_at}
+auto_rotation_running: bool = False                 # True while auto-rotate job executes
+
+_SCAN_TIMEOUT = timedelta(minutes=settings.scan_timeout_minutes)
+_ROTATION_LOCK_TIMEOUT = timedelta(minutes=10)
+
+
+def _scan_is_running() -> bool:
+    """True only if a scan is genuinely in-progress (heartbeat not stale)."""
+    if scan_heartbeat is None:
+        return False
+    return (datetime.now() - scan_heartbeat) < _SCAN_TIMEOUT
+
+
+def _rotation_is_running() -> bool:
+    """True only if a rotation is in-progress and the lock hasn't expired."""
+    if rotation_in_progress is None:
+        return False
+    age = datetime.now() - rotation_in_progress["started_at"]
+    return age < _ROTATION_LOCK_TIMEOUT
+
 
 # ---------------------------------------------------------------------------
 # Auth helpers
@@ -68,10 +95,24 @@ async def lifespan(app: FastAPI):
     await init_db()
     await _seed_services()
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(_background_scan, "interval", minutes=settings.scan_interval_minutes, id="scan", replace_existing=True)
+    scheduler.add_job(
+        _background_scan, "interval",
+        minutes=settings.scan_interval_minutes,
+        id="scan", replace_existing=True,
+    )
+    if settings.auto_rotate_interval_hours > 0:
+        scheduler.add_job(
+            _auto_rotate_stale, "interval",
+            hours=settings.auto_rotate_interval_hours,
+            id="auto_rotate", replace_existing=True,
+        )
+        logger.info("Auto-rotation enabled every %.1fh", settings.auto_rotate_interval_hours)
     scheduler.start()
-    # Run an initial scan shortly after startup
-    scheduler.add_job(_background_scan, "date", run_date=datetime.now() + timedelta(seconds=10), id="initial_scan")
+    scheduler.add_job(
+        _background_scan, "date",
+        run_date=datetime.now() + timedelta(seconds=10),
+        id="initial_scan",
+    )
     yield
     scheduler.shutdown()
 
@@ -117,8 +158,8 @@ async def _seed_services():
                     is_password=1 if is_password_service(svc) else 0,
                     settings_url=svc.settings_url,
                 ))
-        # Seed YAML remote hosts into DB if table is empty
-        host_count = await session.execute(select(__import__('sqlalchemy').func.count(RemoteHost.id)))
+        import sqlalchemy
+        host_count = await session.execute(select(sqlalchemy.func.count(RemoteHost.id)))
         if host_count.scalar() == 0:
             for rh in yaml_hosts:
                 session.add(RemoteHost(
@@ -136,10 +177,10 @@ async def _seed_services():
 # ---------------------------------------------------------------------------
 
 async def _background_scan():
-    global scan_index, last_scan_time, scan_in_progress
-    if scan_in_progress:
+    global scan_index, last_scan_time, scan_heartbeat, last_scan_errors
+    if _scan_is_running():
         return
-    scan_in_progress = True
+    scan_heartbeat = datetime.now()
     started = datetime.now()
     log = ScanLog(started_at=started, status="running")
     async with async_session() as session:
@@ -147,10 +188,15 @@ async def _background_scan():
         await session.commit()
         log_id = log.id
 
+    errors: list[str] = []
     try:
         _, _, _, _, services = load_rotate_keys_config(settings.descriptions_path)
         env = read_env(settings.env_file)
         db_hosts = await _get_db_hosts()
+
+        # Refresh heartbeat before the potentially long scan
+        scan_heartbeat = datetime.now()
+
         index = build_scan_index(
             services, env,
             env_path=settings.env_file,
@@ -160,8 +206,12 @@ async def _background_scan():
         )
         scan_index = index
         last_scan_time = datetime.now()
+        errors = index.scan_errors or []
 
-        # Update hit counts in DB
+        if errors:
+            for err in errors:
+                send_notification("scan_error", "Scanner", err)
+
         async with async_session() as session:
             for sid, svc in services.items():
                 if not svc.env_var:
@@ -182,23 +232,133 @@ async def _background_scan():
                 )
             await session.commit()
 
+        error_msg = "; ".join(errors) if errors else None
+        status = "completed_with_errors" if errors else "completed"
         async with async_session() as session:
             await session.execute(
                 update(ScanLog)
                 .where(ScanLog.id == log_id)
-                .values(completed_at=datetime.now(), status="completed", files_scanned=sum(len(v) for v in index.local_files.values()), keys_found=len(index.local_files))
+                .values(
+                    completed_at=datetime.now(),
+                    status=status,
+                    files_scanned=sum(len(v) for v in index.local_files.values()),
+                    keys_found=len(index.local_files),
+                    error_message=error_msg,
+                )
             )
             await session.commit()
     except Exception as exc:
+        errors = [str(exc)]
         async with async_session() as session:
             await session.execute(
                 update(ScanLog)
                 .where(ScanLog.id == log_id)
-                .values(completed_at=datetime.now(), status="failed")
+                .values(
+                    completed_at=datetime.now(),
+                    status="failed",
+                    error_message=str(exc),
+                )
             )
             await session.commit()
+        logger.exception("Background scan failed: %s", exc)
     finally:
-        scan_in_progress = False
+        last_scan_errors = errors
+        scan_heartbeat = None
+
+
+# ---------------------------------------------------------------------------
+# Auto-rotation scheduler
+# ---------------------------------------------------------------------------
+
+async def _auto_rotate_stale():
+    """Rotate all stale services one-by-one, skipping if scan or rotation active."""
+    global auto_rotation_running
+    if _scan_is_running() or _rotation_is_running() or auto_rotation_running:
+        logger.info("Auto-rotate skipped — another operation in progress")
+        return
+    auto_rotation_running = True
+    try:
+        _, _, _, _, services = load_rotate_keys_config(settings.descriptions_path)
+        env = read_env(settings.env_file)
+        db_hosts = await _get_db_hosts()
+
+        async with async_session() as session:
+            result = await session.execute(
+                select(Service).where(Service.status == "stale")
+            )
+            stale_rows = result.scalars().all()
+
+        # Also catch services whose age_days > 180 even if status not yet updated
+        stale_ids: list[str] = []
+        for row in stale_rows:
+            stale_ids.append(row.id)
+        async with async_session() as session:
+            result = await session.execute(select(Service))
+            for row in result.scalars().all():
+                if row.id not in stale_ids and row.last_rotated:
+                    age_days = (datetime.now() - row.last_rotated).days
+                    if age_days > 180:
+                        stale_ids.append(row.id)
+
+        if not stale_ids:
+            logger.info("Auto-rotate: no stale services found")
+            return
+
+        logger.info("Auto-rotate: rotating %d stale service(s)", len(stale_ids))
+
+        global scan_index
+        if not scan_index:
+            scan_index = build_scan_index(
+                services, env,
+                env_path=settings.env_file,
+                remote_hosts=db_hosts,
+            )
+
+        for sid in stale_ids:
+            if sid not in services:
+                continue
+            svc = services[sid]
+            if not svc.env_var or not env.get(svc.env_var):
+                continue
+            # Acquire rotation lock
+            if _rotation_is_running():
+                logger.warning("Auto-rotate: rotation lock held, stopping")
+                break
+            global rotation_in_progress
+            rotation_in_progress = {"service_id": sid, "started_at": datetime.now()}
+            try:
+                ok = rotate(
+                    sid, svc, env, settings.env_file, scan_index,
+                    rotation_log={},
+                    dry_run=False,
+                    non_interactive=True,
+                    generate_passwords=True,
+                    bw_session=None,
+                    remote_hosts=db_hosts,
+                )
+                if ok:
+                    new_hash = hashlib.sha256(env.get(svc.env_var, "").encode()).hexdigest()[:16]
+                    async with async_session() as session:
+                        await session.execute(
+                            update(Service)
+                            .where(Service.id == sid)
+                            .values(last_rotated=datetime.now(), current_hash=new_hash, status="ok")
+                        )
+                        session.add(RotationHistory(
+                            service_id=sid,
+                            old_hash="",
+                            new_hash=new_hash,
+                            success=1,
+                            message="Auto-rotated (scheduled)",
+                        ))
+                        await session.commit()
+            except Exception as exc:
+                logger.exception("Auto-rotate failed for %s: %s", sid, exc)
+                send_notification("rotation_failed", svc.display_name, str(exc), service_id=sid, source="auto-rotate")
+            finally:
+                rotation_in_progress = None
+    finally:
+        auto_rotation_running = False
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +393,10 @@ async def logout(request: Request):
 async def dashboard(request: Request):
     if not is_authenticated(request):
         return RedirectResponse(url="/login", status_code=303)
-    return templates.TemplateResponse("dashboard.html", {"request": request})
+    return templates.TemplateResponse("dashboard.html", {
+        "request": request,
+        "auto_rotate_hours": settings.auto_rotate_interval_hours,
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -272,8 +435,12 @@ async def api_services(request: Request):
 async def api_scan_status(request: Request):
     require_auth(request)
     return {
-        "in_progress": scan_in_progress,
+        "in_progress": _scan_is_running(),
+        "auto_rotation_running": auto_rotation_running,
+        "rotation_in_progress": rotation_in_progress["service_id"] if _rotation_is_running() else None,
         "last_scan": last_scan_time.isoformat() if last_scan_time else None,
+        "scan_errors": last_scan_errors,
+        "auto_rotate_hours": settings.auto_rotate_interval_hours,
     }
 
 
@@ -287,7 +454,14 @@ async def api_rotate(
     sync_bitwarden_flag: bool = Form(False),
 ):
     require_auth(request)
-    global scan_index
+    global scan_index, rotation_in_progress
+
+    # Rotation lock — reject concurrent rotations
+    if not dry_run and _rotation_is_running():
+        raise HTTPException(
+            status_code=409,
+            detail=f"Rotation already in progress for '{rotation_in_progress['service_id']}'. Try again shortly.",
+        )
 
     _, _, _, _, services = load_rotate_keys_config(settings.descriptions_path)
     if service_id not in services:
@@ -307,19 +481,25 @@ async def api_rotate(
             if bw_password:
                 bw_session = bw_unlock(bw_password)
 
-    rotation_log = {}
-    ok = rotate(
-        service_id, svc, env, settings.env_file, scan_index,
-        rotation_log=rotation_log,
-        dry_run=dry_run,
-        non_interactive=True,
-        generate_passwords=generate_password,
-        bw_session=bw_session,
-        new_key=new_value,
-        remote_hosts=db_hosts,
-    )
+    if not dry_run:
+        rotation_in_progress = {"service_id": service_id, "started_at": datetime.now()}
 
-    # Update DB
+    rotation_log = {}
+    try:
+        ok = rotate(
+            service_id, svc, env, settings.env_file, scan_index,
+            rotation_log=rotation_log,
+            dry_run=dry_run,
+            non_interactive=True,
+            generate_passwords=generate_password,
+            bw_session=bw_session,
+            new_key=new_value,
+            remote_hosts=db_hosts,
+        )
+    finally:
+        if not dry_run:
+            rotation_in_progress = None
+
     async with async_session() as session:
         if ok and not dry_run:
             new_hash = hashlib.sha256((new_value or env.get(svc.env_var, "")).encode()).hexdigest()[:16]
@@ -348,7 +528,14 @@ async def api_rotate_all(
     sync_bitwarden_flag: bool = Form(False),
 ):
     require_auth(request)
-    global scan_index
+    global scan_index, rotation_in_progress
+
+    if not dry_run and _rotation_is_running():
+        raise HTTPException(
+            status_code=409,
+            detail=f"Rotation already in progress for '{rotation_in_progress['service_id']}'.",
+        )
+
     _, _, _, _, services = load_rotate_keys_config(settings.descriptions_path)
     env = read_env(settings.env_file)
     db_hosts = await _get_db_hosts()
@@ -367,15 +554,21 @@ async def api_rotate_all(
     for sid, svc in services.items():
         if not svc.env_var or not env.get(svc.env_var):
             continue
-        ok = rotate(
-            sid, svc, env, settings.env_file, scan_index,
-            rotation_log={},
-            dry_run=dry_run,
-            non_interactive=True,
-            generate_passwords=generate_password,
-            bw_session=bw_session,
-            remote_hosts=db_hosts,
-        )
+        if not dry_run:
+            rotation_in_progress = {"service_id": sid, "started_at": datetime.now()}
+        try:
+            ok = rotate(
+                sid, svc, env, settings.env_file, scan_index,
+                rotation_log={},
+                dry_run=dry_run,
+                non_interactive=True,
+                generate_passwords=generate_password,
+                bw_session=bw_session,
+                remote_hosts=db_hosts,
+            )
+        finally:
+            if not dry_run:
+                rotation_in_progress = None
         results.append({"service": sid, "success": ok})
         if ok and not dry_run:
             async with async_session() as session:
@@ -543,6 +736,4 @@ async def api_ssh_keys_delete(request: Request, key_id: int):
 async def api_reset_password(request: Request, reset_key: str = Form(...), new_password: str = Form(...)):
     if not verify_reset_key(reset_key):
         raise HTTPException(status_code=403, detail="Invalid reset key")
-    # In a real deployment this would mutate settings.admin_password persistently.
-    # For now we just acknowledge; persistent change requires env var update.
     return {"success": True, "message": "Password reset acknowledged. Update ADMIN_PASSWORD in your .env and restart the container."}
