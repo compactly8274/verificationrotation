@@ -305,6 +305,11 @@ async def _auto_rotate_stale():
         if not scan_index:
             scan_index = build_scan_index(services, env, env_path=settings.env_file, remote_hosts=db_hosts)
 
+        # Fetch hit counts for all stale services in one query
+        async with async_session() as session:
+            result = await session.execute(select(Service).where(Service.id.in_(stale_ids)))
+            hit_counts = {row.id: row.hit_count for row in result.scalars().all()}
+
         for sid in stale_ids:
             if sid not in services:
                 continue
@@ -325,6 +330,7 @@ async def _auto_rotate_stale():
                     generate_passwords=True,
                     bw_session=get_bw_session(),
                     remote_hosts=db_hosts,
+                    known_hits=hit_counts.get(sid, -1),
                 )
                 if ok:
                     new_hash = hashlib.sha256(env.get(svc.env_var, "").encode()).hexdigest()[:16]
@@ -362,7 +368,7 @@ async def health():
 
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
-    return templates.TemplateResponse("login.html", {"request": request, "error": None})
+    return templates.TemplateResponse(request, "login.html", {"error": None})
 
 
 @app.post("/login")
@@ -370,7 +376,7 @@ async def login_post(request: Request, password: str = Form(...)):
     if verify_password(password):
         request.session["authenticated"] = True
         return RedirectResponse(url="/", status_code=303)
-    return templates.TemplateResponse("login.html", {"request": request, "error": "Invalid password"}, status_code=401)
+    return templates.TemplateResponse(request, "login.html", {"error": "Invalid password"}, status_code=401)
 
 
 @app.get("/logout")
@@ -383,8 +389,7 @@ async def logout(request: Request):
 async def dashboard(request: Request):
     if not is_authenticated(request):
         return RedirectResponse(url="/login", status_code=303)
-    return templates.TemplateResponse("dashboard.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "dashboard.html", {
         "auto_rotate_hours": settings.auto_rotate_interval_hours,
     })
 
@@ -501,6 +506,11 @@ async def api_rotate(
 
     bw_session = get_bw_session() if sync_bitwarden_flag and bw_available() else None
 
+    # Fetch hit_count here (async) so rotate() doesn't need to do async I/O
+    async with async_session() as session:
+        svc_row = await session.get(Service, service_id)
+        known_hits = svc_row.hit_count if svc_row else -1
+
     if not dry_run:
         rotation_in_progress = {"service_id": service_id, "started_at": datetime.now()}
 
@@ -515,6 +525,7 @@ async def api_rotate(
             bw_session=bw_session,
             new_key=new_value,
             remote_hosts=db_hosts,
+            known_hits=known_hits,
         )
     finally:
         if not dry_run:
@@ -609,7 +620,7 @@ async def api_rotate_all(
 async def hosts_page(request: Request):
     if not is_authenticated(request):
         return RedirectResponse(url="/login", status_code=303)
-    return templates.TemplateResponse("hosts.html", {"request": request})
+    return templates.TemplateResponse(request, "hosts.html")
 
 
 @app.get("/api/hosts")
@@ -691,7 +702,7 @@ async def api_hosts_delete(request: Request, host_id: int):
 async def ssh_keys_page(request: Request):
     if not is_authenticated(request):
         return RedirectResponse(url="/login", status_code=303)
-    return templates.TemplateResponse("ssh_keys.html", {"request": request})
+    return templates.TemplateResponse(request, "ssh_keys.html")
 
 
 @app.get("/api/ssh-keys")
