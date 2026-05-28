@@ -11,7 +11,6 @@ services:
       - ADMIN_PASSWORD=${ADMIN_PASSWORD}
       - RESET_KEY=${RESET_KEY}
       - BW_SESSION=${BW_SESSION}
-      - BW_PASSWORD=${BW_PASSWORD}
       - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
     volumes:
       - /mnt/user/appdata:/mnt/user/appdata:ro
