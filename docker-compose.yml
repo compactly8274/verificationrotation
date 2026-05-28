@@ -1,0 +1,20 @@
+services:
+  verificationrotation:
+    image: ghcr.io/compactly8274/verificationrotation:latest
+    container_name: verificationrotation
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - RESET_KEY=${RESET_KEY}
+      - BW_SESSION=${BW_SESSION}
+      - BW_PASSWORD=${BW_PASSWORD}
+      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
+    volumes:
+      - /mnt/user/appdata:/mnt/user/appdata:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./data:/app/data
+      - ./rotate_keys.yaml:/app/rotate_keys.yaml:ro

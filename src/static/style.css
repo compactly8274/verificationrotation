@@ -1,0 +1,53 @@
+:root {
+  --pico-font-family-sans-serif: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.badge.ok { background: var(--pico-color-green-500); color: #fff; }
+.badge.stale { background: var(--pico-color-amber-500); color: #000; }
+.badge.missing { background: var(--pico-color-red-500); color: #fff; }
+.badge.error { background: var(--pico-color-red-700); color: #fff; }
+
+.status-dot {
+  display: inline-block;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  margin-right: 0.4rem;
+}
+.status-dot.ok { background: var(--pico-color-green-500); }
+.status-dot.stale { background: var(--pico-color-amber-500); }
+.status-dot.missing { background: var(--pico-color-red-500); }
+.status-dot.error { background: var(--pico-color-red-700); }
+
+.service-card {
+  margin-bottom: 1rem;
+}
+
+.service-card header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.service-card h4 {
+  margin: 0;
+}
+
+.hit-count {
+  font-size: 0.85rem;
+  color: var(--pico-muted-color);
+}
+
+#services-container article {
+  padding: 1rem;
+}
