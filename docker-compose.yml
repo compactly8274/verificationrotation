@@ -17,4 +17,3 @@ services:
       - /mnt/user/appdata:/mnt/user/appdata:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./data:/app/data
-      - ./rotate_keys.yaml:/app/rotate_keys.yaml:ro
