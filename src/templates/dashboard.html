@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard — VerificationRotation{% endblock %}
+
+{% block content %}
+<nav>
+  <ul>
+    <li><strong>VerificationRotation</strong></li>
+  </ul>
+  <ul>
+    <li><span id="scan-status-badge" class="badge">Scanning...</span></li>
+    <li><a href="/logout" role="button" class="secondary outline">Logout</a></li>
+  </ul>
+</nav>
+
+<div class="grid">
+  <div>
+    <h2>Services</h2>
+    <p id="last-scan">Last scan: never</p>
+  </div>
+  <div style="text-align: right;">
+    <button id="btn-rotate-all" class="contrast" onclick="rotateAll()">Rotate All Stale</button>
+    <button id="btn-refresh" class="secondary outline" onclick="loadServices()">Refresh</button>
+  </div>
+</div>
+
+<div id="services-container">
+  <!-- Populated by JS -->
+  <article aria-busy="true"></article>
+</div>
+
+<!-- Rotate Modal -->
+<dialog id="rotate-modal">
+  <article>
+    <header>
+      <button aria-label="Close" rel="prev" onclick="closeModal()"></button>
+      <h3 id="modal-title">Rotate Secret</h3>
+    </header>
+    <form id="rotate-form" onsubmit="submitRotate(event)">
+      <input type="hidden" id="modal-service-id" name="service_id">
+      <label>
+        New value (leave blank to auto-generate password)
+        <input type="text" id="modal-new-value" name="new_value" placeholder="Paste new key or password">
+      </label>
+      <fieldset>
+        <label>
+          <input type="checkbox" id="modal-dry-run" name="dry_run">
+          Dry run only
+        </label>
+        <label>
+          <input type="checkbox" id="modal-gen-pw" name="generate_password">
+          Auto-generate password
+        </label>
+        <label>
+          <input type="checkbox" id="modal-sync-bw" name="sync_bitwarden">
+          Sync to Bitwarden
+        </label>
+      </fieldset>
+      <footer>
+        <button type="submit" class="primary">Rotate</button>
+      </footer>
+    </form>
+    <pre id="modal-result"></pre>
+  </article>
+</dialog>
+{% endblock %}

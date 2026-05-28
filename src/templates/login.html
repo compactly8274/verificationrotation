@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+
+{% block title %}Login — VerificationRotation{% endblock %}
+
+{% block content %}
+<article class="grid" style="max-width: 480px; margin: 10vh auto;">
+  <div>
+    <h1>VerificationRotation</h1>
+    <p>Sign in to manage your homelab secrets.</p>
+    <form method="post" action="/login">
+      <label>
+        Password
+        <input type="password" name="password" placeholder="Admin password" required autofocus>
+      </label>
+      <button type="submit">Sign in</button>
+    </form>
+    {% if error %}
+      <p style="color: var(--pico-color-red-500);">{{ error }}</p>
+    {% endif %}
+  </div>
+</article>
+{% endblock %}
