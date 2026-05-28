@@ -362,7 +362,7 @@ async def health():
 
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request):
-    return templates.TemplateResponse("login.html", {"request": request, "error": None})
+    return templates.TemplateResponse(request, "login.html", {"error": None})
 
 
 @app.post("/login")
@@ -370,7 +370,7 @@ async def login_post(request: Request, password: str = Form(...)):
     if verify_password(password):
         request.session["authenticated"] = True
         return RedirectResponse(url="/", status_code=303)
-    return templates.TemplateResponse("login.html", {"request": request, "error": "Invalid password"}, status_code=401)
+    return templates.TemplateResponse(request, "login.html", {"error": "Invalid password"}, status_code=401)
 
 
 @app.get("/logout")
@@ -383,8 +383,7 @@ async def logout(request: Request):
 async def dashboard(request: Request):
     if not is_authenticated(request):
         return RedirectResponse(url="/login", status_code=303)
-    return templates.TemplateResponse("dashboard.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "dashboard.html", {
         "auto_rotate_hours": settings.auto_rotate_interval_hours,
     })
 
@@ -609,7 +608,7 @@ async def api_rotate_all(
 async def hosts_page(request: Request):
     if not is_authenticated(request):
         return RedirectResponse(url="/login", status_code=303)
-    return templates.TemplateResponse("hosts.html", {"request": request})
+    return templates.TemplateResponse(request, "hosts.html")
 
 
 @app.get("/api/hosts")
@@ -691,7 +690,7 @@ async def api_hosts_delete(request: Request, host_id: int):
 async def ssh_keys_page(request: Request):
     if not is_authenticated(request):
         return RedirectResponse(url="/login", status_code=303)
-    return templates.TemplateResponse("ssh_keys.html", {"request": request})
+    return templates.TemplateResponse(request, "ssh_keys.html")
 
 
 @app.get("/api/ssh-keys")
