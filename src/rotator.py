@@ -360,6 +360,7 @@ def rotate(
     bw_session: Optional[str] = None,
     new_key: Optional[str] = None,
     remote_hosts: Optional[list[dict]] = None,
+    known_hits: int = -1,  # -1 = unknown; caller supplies from DB to avoid async-in-sync
 ) -> bool:
     print(f"\n{'─'*60}")
     print(f"  {svc.display_name}")
@@ -420,40 +421,19 @@ def rotate(
     has_hits = any([file_hits, db_hits, remote_file_hits, remote_db_hits])
 
     # ── Pre-flight: abort if key has known hits but scan finds none ───────
-    # Protects against stale scan index returning zero results when the key
-    # genuinely exists in configs — refusing to rotate blind is safer.
-    if non_interactive and not dry_run:
-        from src.database import async_session as _async_session
-        import asyncio
-        from src.models import Service as _Service
-        from sqlalchemy import select as _select
-
-        async def _get_hit_count():
-            try:
-                async with _async_session() as _sess:
-                    row = await _sess.execute(_select(_Service).where(_Service.id == service_id))
-                    svc_row = row.scalar_one_or_none()
-                    return svc_row.hit_count if svc_row else 0
-            except Exception:
-                return 0
-
-        try:
-            known_hits = asyncio.get_event_loop().run_until_complete(_get_hit_count())
-        except RuntimeError:
-            known_hits = 0
-
-        if known_hits > 0 and total_hits == 0:
-            msg = f"Key has {known_hits} known reference(s) but scan found 0 — refusing to rotate (stale index?)"
-            print(f"  ✗ {msg}")
-            log_audit(env_path, service_id, _key_hash(old_key), "", 0, 0, False, msg)
-            send_notification("rotation_failed", svc.display_name, msg, service_id=service_id)
-            return False
+    # known_hits is supplied by the async caller (main.py) to avoid the
+    # "event loop already running" problem with asyncio inside sync code.
+    if non_interactive and not dry_run and known_hits > 0 and total_hits == 0:
+        msg = f"Key has {known_hits} known reference(s) but scan found 0 — refusing to rotate (stale index?)"
+        print(f"  ✗ {msg}")
+        log_audit(env_path, service_id, _key_hash(old_key), "", 0, 0, False, msg)
+        send_notification("rotation_failed", svc.display_name, msg, service_id=service_id)
+        return False
 
     if non_interactive:
         if not svc.auto_fetch and (svc.settings_url or has_hits):
-            print(f"  [non-interactive] Skipping — requires manual UI interaction")
-            log_audit(env_path, service_id, _key_hash(old_key), "", 0, 0, False, "Skipped in non-interactive mode")
-            return False
+            print(f"  [non-interactive] Skipping — requires manual UI interaction (open {svc.settings_url or 'the service UI'} to rotate manually)")
+            return True  # not a failure — just needs manual action
 
     if not has_hits and not svc.settings_url and not svc.auto_fetch:
         print("  No references found and no settings URL — updating .env only.")
