@@ -21,7 +21,7 @@ from src.bitwarden import bw_available, bw_get_session, bw_unlock
 from src.config import settings
 from src.database import async_session, init_db
 from src.env_manager import read_env
-from src.models import RotationHistory, ScanLog, Service
+from src.models import RemoteHost, RotationHistory, ScanLog, Service
 from src.rotator import generate_password, is_password_service, rotate
 from src.scanner import ScanIndex, build_scan_index
 from src.services_registry import ServiceDef, load_rotate_keys_config
@@ -85,8 +85,25 @@ templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 # Seed services into DB from YAML
 # ---------------------------------------------------------------------------
 
+def _db_host_to_dict(row: RemoteHost) -> dict:
+    return {
+        "label": row.label,
+        "host": row.host,
+        "user": row.user,
+        "search_dirs": json.loads(row.search_dirs) if row.search_dirs else [],
+        "db_refs": [tuple(r) for r in json.loads(row.db_refs)] if row.db_refs else [],
+    }
+
+
+async def _get_db_hosts() -> list[dict]:
+    async with async_session() as session:
+        result = await session.execute(select(RemoteHost))
+        rows = result.scalars().all()
+        return [_db_host_to_dict(r) for r in rows]
+
+
 async def _seed_services():
-    _, _, _, _, services = load_rotate_keys_config(settings.descriptions_path)
+    _, _, _, yaml_hosts, services = load_rotate_keys_config(settings.descriptions_path)
     async with async_session() as session:
         for sid, svc in services.items():
             result = await session.execute(select(Service).where(Service.id == sid))
@@ -98,6 +115,17 @@ async def _seed_services():
                     env_var=svc.env_var,
                     is_password=1 if is_password_service(svc) else 0,
                     settings_url=svc.settings_url,
+                ))
+        # Seed YAML remote hosts into DB if table is empty
+        host_count = await session.execute(select(__import__('sqlalchemy').func.count(RemoteHost.id)))
+        if host_count.scalar() == 0:
+            for rh in yaml_hosts:
+                session.add(RemoteHost(
+                    label=rh["label"],
+                    host=rh["host"],
+                    user=rh["user"],
+                    search_dirs=json.dumps(rh.get("search_dirs", [])),
+                    db_refs=json.dumps(rh.get("db_refs", [])),
                 ))
         await session.commit()
 
@@ -121,11 +149,13 @@ async def _background_scan():
     try:
         _, _, _, _, services = load_rotate_keys_config(settings.descriptions_path)
         env = read_env(settings.env_file)
+        db_hosts = await _get_db_hosts()
         index = build_scan_index(
             services, env,
             env_path=settings.env_file,
             skip_remote=False,
             cache_max_age=settings.cache_max_age_hours,
+            remote_hosts=db_hosts,
         )
         scan_index = index
         last_scan_time = datetime.now()
@@ -264,14 +294,14 @@ async def api_rotate(
     svc = services[service_id]
 
     env = read_env(settings.env_file)
+    db_hosts = await _get_db_hosts()
     if not scan_index:
-        scan_index = build_scan_index(services, env, env_path=settings.env_file)
+        scan_index = build_scan_index(services, env, env_path=settings.env_file, remote_hosts=db_hosts)
 
     bw_session = None
     if sync_bitwarden_flag and bw_available():
         bw_session = bw_get_session()
         if not bw_session:
-            # Try to unlock if BW_PASSWORD is in env
             bw_password = os.environ.get("BW_PASSWORD", "").strip()
             if bw_password:
                 bw_session = bw_unlock(bw_password)
@@ -285,6 +315,7 @@ async def api_rotate(
         generate_passwords=generate_password,
         bw_session=bw_session,
         new_key=new_value,
+        remote_hosts=db_hosts,
     )
 
     # Update DB
@@ -319,8 +350,9 @@ async def api_rotate_all(
     global scan_index
     _, _, _, _, services = load_rotate_keys_config(settings.descriptions_path)
     env = read_env(settings.env_file)
+    db_hosts = await _get_db_hosts()
     if not scan_index:
-        scan_index = build_scan_index(services, env, env_path=settings.env_file)
+        scan_index = build_scan_index(services, env, env_path=settings.env_file, remote_hosts=db_hosts)
 
     bw_session = None
     if sync_bitwarden_flag and bw_available():
@@ -341,6 +373,7 @@ async def api_rotate_all(
             non_interactive=True,
             generate_passwords=generate_password,
             bw_session=bw_session,
+            remote_hosts=db_hosts,
         )
         results.append({"service": sid, "success": ok})
         if ok and not dry_run:
@@ -361,6 +394,93 @@ async def api_rotate_all(
                 await session.commit()
 
     return {"results": results, "dry_run": dry_run}
+
+
+@app.get("/hosts", response_class=HTMLResponse)
+async def hosts_page(request: Request):
+    if not is_authenticated(request):
+        return RedirectResponse(url="/login", status_code=303)
+    return templates.TemplateResponse("hosts.html", {"request": request})
+
+
+@app.get("/api/hosts")
+async def api_hosts(request: Request):
+    require_auth(request)
+    async with async_session() as session:
+        result = await session.execute(select(RemoteHost))
+        rows = result.scalars().all()
+        return [
+            {
+                "id": r.id,
+                "label": r.label,
+                "host": r.host,
+                "user": r.user,
+                "search_dirs": json.loads(r.search_dirs) if r.search_dirs else [],
+                "db_refs": json.loads(r.db_refs) if r.db_refs else [],
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
+
+
+@app.post("/api/hosts")
+async def api_hosts_create(
+    request: Request,
+    label: str = Form(...),
+    host: str = Form(...),
+    user: str = Form(...),
+    search_dirs: str = Form("[]"),
+    db_refs: str = Form("[]"),
+):
+    require_auth(request)
+    async with async_session() as session:
+        session.add(RemoteHost(
+            label=label,
+            host=host,
+            user=user,
+            search_dirs=search_dirs,
+            db_refs=db_refs,
+        ))
+        await session.commit()
+    return {"success": True}
+
+
+@app.put("/api/hosts/{host_id}")
+async def api_hosts_update(
+    request: Request,
+    host_id: int,
+    label: str = Form(...),
+    host: str = Form(...),
+    user: str = Form(...),
+    search_dirs: str = Form("[]"),
+    db_refs: str = Form("[]"),
+):
+    require_auth(request)
+    async with async_session() as session:
+        result = await session.execute(select(RemoteHost).where(RemoteHost.id == host_id))
+        row = result.scalar_one_or_none()
+        if not row:
+            raise HTTPException(status_code=404, detail="Host not found")
+        row.label = label
+        row.host = host
+        row.user = user
+        row.search_dirs = search_dirs
+        row.db_refs = db_refs
+        await session.commit()
+    return {"success": True}
+
+
+@app.delete("/api/hosts/{host_id}")
+async def api_hosts_delete(request: Request, host_id: int):
+    require_auth(request)
+    async with async_session() as session:
+        result = await session.execute(select(RemoteHost).where(RemoteHost.id == host_id))
+        row = result.scalar_one_or_none()
+        if not row:
+            raise HTTPException(status_code=404, detail="Host not found")
+        await session.delete(row)
+        await session.commit()
+    return {"success": True}
 
 
 @app.post("/api/reset-password")

@@ -46,3 +46,15 @@ class ScanLog(Base):
     files_scanned = Column(Integer, default=0)
     keys_found = Column(Integer, default=0)
     status = Column(String, default="pending")  # pending, running, completed, failed
+
+
+class RemoteHost(Base):
+    __tablename__ = "remote_hosts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    label = Column(String, nullable=False)
+    host = Column(String, nullable=False)
+    user = Column(String, nullable=False)
+    search_dirs = Column(Text, nullable=False, default="[]")  # JSON list
+    db_refs = Column(Text, nullable=False, default="[]")     # JSON list of tuples
+    created_at = Column(DateTime, server_default=func.now())

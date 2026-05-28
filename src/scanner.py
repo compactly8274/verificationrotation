@@ -315,8 +315,11 @@ def build_scan_index(
     cache_path: Optional[Path] = None,
     cache_max_age: float = 4.0,
     no_cache: bool = False,
+    remote_hosts: Optional[list[dict]] = None,
 ) -> ScanIndex:
-    search_dirs, search_exts, skip_dirs, remote_hosts, _ = load_rotate_keys_config(Path("rotate_keys.yaml"))
+    search_dirs, search_exts, skip_dirs, yaml_hosts, _ = load_rotate_keys_config(Path("rotate_keys.yaml"))
+    if remote_hosts is None:
+        remote_hosts = yaml_hosts
 
     old_keys: set[str] = set()
     key_db_refs: dict[str, list] = {}

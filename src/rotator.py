@@ -276,6 +276,7 @@ def rotate(
     generate_passwords: bool = False,
     bw_session: Optional[str] = None,
     new_key: Optional[str] = None,
+    remote_hosts: Optional[list[dict]] = None,
 ) -> bool:
     print(f"\n{'─'*60}")
     print(f"  {svc.display_name}")
@@ -411,8 +412,9 @@ def rotate(
 
     remote_changed_files: dict[str, list[str]] = {}
     remote_changed_dbs: dict[str, list[str]] = {}
-    from src.services_registry import load_rotate_keys_config
-    _, _, _, remote_hosts, _ = load_rotate_keys_config(Path("rotate_keys.yaml"))
+    if remote_hosts is None:
+        from src.services_registry import load_rotate_keys_config
+        _, _, _, remote_hosts, _ = load_rotate_keys_config(Path("rotate_keys.yaml"))
     for rh in remote_hosts:
         label = rh["label"]
         hits = remote_file_hits.get(label, [])

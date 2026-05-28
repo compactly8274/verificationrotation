@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+
+{% block title %}Remote Hosts — VerificationRotation{% endblock %}
+
+{% block content %}
+<nav>
+  <ul>
+    <li><strong>VerificationRotation</strong></li>
+    <li><a href="/">Dashboard</a></li>
+  </ul>
+  <ul>
+    <li><a href="/logout" role="button" class="secondary outline">Logout</a></li>
+  </ul>
+</nav>
+
+<h2>Remote Hosts</h2>
+<p>Hosts scanned for secret references over SSH.</p>
+
+<button class="primary" onclick="openHostModal()">Add Host</button>
+
+<div id="hosts-container">
+  <article aria-busy="true"></article>
+</div>
+
+<dialog id="host-modal">
+  <article>
+    <header>
+      <button aria-label="Close" rel="prev" onclick="closeHostModal()"></button>
+      <h3 id="host-modal-title">Add Host</h3>
+    </header>
+    <form id="host-form" onsubmit="submitHost(event)">
+      <input type="hidden" id="host-modal-id" name="host_id">
+      <label>Label
+        <input type="text" id="host-label" name="label" placeholder="TrueNAS" required>
+      </label>
+      <label>Host/IP
+        <input type="text" id="host-host" name="host" placeholder="192.168.1.122" required>
+      </label>
+      <label>SSH User
+        <input type="text" id="host-user" name="user" placeholder="root" required>
+      </label>
+      <label>Search Directories (JSON array)
+        <input type="text" id="host-search-dirs" name="search_dirs" value='["/mnt/Data/appdata"]'>
+      </label>
+      <label>DB References (JSON array of tuples)
+        <input type="text" id="host-db-refs" name="db_refs" value='[]'>
+      </label>
+      <footer>
+        <button type="submit" class="primary">Save</button>
+      </footer>
+    </form>
+    <pre id="host-modal-result"></pre>
+  </article>
+</dialog>
+{% endblock %}

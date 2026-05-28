@@ -125,7 +125,124 @@ async function rotateAll() {
   }
 }
 
-// Initial load
-loadServices();
-loadScanStatus();
-setInterval(loadScanStatus, 30000);
+// Hosts page functions
+async function loadHosts() {
+  const container = document.getElementById('hosts-container');
+  if (!container) return;
+  container.innerHTML = '<article aria-busy="true"></article>';
+  try {
+    const res = await fetch('/api/hosts');
+    const hosts = await res.json();
+    renderHosts(hosts);
+  } catch (e) {
+    container.innerHTML = '<p style="color:red">Failed to load hosts.</p>';
+  }
+}
+
+function renderHosts(hosts) {
+  const container = document.getElementById('hosts-container');
+  if (!hosts.length) {
+    container.innerHTML = '<p>No remote hosts configured. Add one to scan it for secret references.</p>';
+    return;
+  }
+  let html = '<table><thead><tr><th>Label</th><th>Host</th><th>User</th><th>Search Dirs</th><th>Actions</th></tr></thead><tbody>';
+  for (const h of hosts) {
+    const sd = JSON.stringify(h.search_dirs).replace(/"/g, '&quot;');
+    const dr = JSON.stringify(h.db_refs).replace(/"/g, '&quot;');
+    html += `
+      <tr data-id="${h.id}" data-label="${h.label}" data-host="${h.host}" data-user="${h.user}" data-searchdirs="${sd}" data-dbrefs="${dr}">
+        <td>${h.label}</td>
+        <td>${h.host}</td>
+        <td>${h.user}</td>
+        <td><code>${h.search_dirs.join(', ')}</code></td>
+        <td>
+          <button class="secondary outline" onclick="editHostFromRow(this.closest('tr'))">Edit</button>
+          <button class="secondary outline" onclick="deleteHost(${h.id})">Delete</button>
+        </td>
+      </tr>
+    `;
+  }
+  html += '</tbody></table>';
+  container.innerHTML = html;
+}
+
+function openHostModal() {
+  document.getElementById('host-modal-id').value = '';
+  document.getElementById('host-label').value = '';
+  document.getElementById('host-host').value = '';
+  document.getElementById('host-user').value = '';
+  document.getElementById('host-search-dirs').value = '["/mnt/Data/appdata"]';
+  document.getElementById('host-db-refs').value = '[]';
+  document.getElementById('host-modal-title').textContent = 'Add Host';
+  document.getElementById('host-modal-result').textContent = '';
+  document.getElementById('host-modal').showModal();
+}
+
+function closeHostModal() {
+  document.getElementById('host-modal').close();
+}
+
+function editHostFromRow(row) {
+  document.getElementById('host-modal-id').value = row.dataset.id;
+  document.getElementById('host-label').value = row.dataset.label;
+  document.getElementById('host-host').value = row.dataset.host;
+  document.getElementById('host-user').value = row.dataset.user;
+  document.getElementById('host-search-dirs').value = row.dataset.searchdirs.replace(/&quot;/g, '"');
+  document.getElementById('host-db-refs').value = row.dataset.dbrefs.replace(/&quot;/g, '"');
+  document.getElementById('host-modal-title').textContent = 'Edit Host';
+  document.getElementById('host-modal-result').textContent = '';
+  document.getElementById('host-modal').showModal();
+}
+
+async function submitHost(event) {
+  event.preventDefault();
+  const id = document.getElementById('host-modal-id').value;
+  const label = document.getElementById('host-label').value;
+  const host = document.getElementById('host-host').value;
+  const user = document.getElementById('host-user').value;
+  const searchDirs = document.getElementById('host-search-dirs').value;
+  const dbRefs = document.getElementById('host-db-refs').value;
+  const resultPre = document.getElementById('host-modal-result');
+  resultPre.textContent = 'Saving...';
+
+  const form = new FormData();
+  form.append('label', label);
+  form.append('host', host);
+  form.append('user', user);
+  form.append('search_dirs', searchDirs);
+  form.append('db_refs', dbRefs);
+
+  try {
+    const url = id ? `/api/hosts/${id}` : '/api/hosts';
+    const method = id ? 'PUT' : 'POST';
+    const res = await fetch(url, { method, body: form });
+    const data = await res.json();
+    resultPre.textContent = JSON.stringify(data, null, 2);
+    if (data.success) {
+      setTimeout(() => { closeHostModal(); loadHosts(); }, 500);
+    }
+  } catch (e) {
+    resultPre.textContent = 'Error: ' + e.message;
+  }
+}
+
+async function deleteHost(id) {
+  if (!confirm('Delete this host?')) return;
+  try {
+    const res = await fetch(`/api/hosts/${id}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.success) loadHosts();
+  } catch (e) {
+    alert('Error: ' + e.message);
+  }
+}
+
+// Initial load (page-aware)
+if (document.getElementById('services-container')) {
+  loadServices();
+  loadScanStatus();
+  setInterval(loadScanStatus, 30000);
+}
+if (document.getElementById('hosts-container')) {
+  loadHosts();
+}
