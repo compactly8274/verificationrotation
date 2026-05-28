@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Environment files (contain secrets)
+.env
+*.env.local
+
+# App data / runtime
+data/
+*.db
+*.db.bak
+*.db-shm
+*.db-wal
+.rotate_keys_cache.json
+.rotate_keys_audit.jsonl
+.rotate_keys_backups/
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
