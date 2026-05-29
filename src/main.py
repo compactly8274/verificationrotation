@@ -579,6 +579,19 @@ async def api_services(request: Request):
         return data
 
 
+@app.put("/api/services/{service_id}")
+async def api_services_update(request: Request, service_id: str, settings_url: str = Form("")):
+    require_auth(request)
+    async with async_session() as session:
+        result = await session.execute(select(Service).where(Service.id == service_id))
+        row = result.scalar_one_or_none()
+        if not row:
+            raise HTTPException(status_code=404, detail="Service not found")
+        row.settings_url = settings_url
+        await session.commit()
+    return {"success": True}
+
+
 @app.get("/api/scan-status")
 async def api_scan_status(request: Request):
     require_auth(request)
