@@ -16,6 +16,58 @@ def bw_available() -> bool:
         return False
 
 
+def bw_status() -> dict:
+    """Return {'status': 'unauthenticated'|'locked'|'unlocked', 'userEmail': ...}"""
+    try:
+        result = subprocess.run(
+            ["bw", "status"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            data = json.loads(result.stdout.strip())
+            return {"status": data.get("status", "unauthenticated"), "userEmail": data.get("userEmail", "")}
+    except Exception:
+        pass
+    return {"status": "unauthenticated", "userEmail": ""}
+
+
+def bw_configure_server(server_url: str) -> tuple[bool, str]:
+    """Point the CLI at a self-hosted Vaultwarden/Bitwarden instance."""
+    try:
+        result = subprocess.run(
+            ["bw", "config", "server", server_url],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            return True, ""
+        return False, (result.stderr.strip() or result.stdout.strip())
+    except Exception as exc:
+        return False, str(exc)
+
+
+def bw_login(email: str, master_password: str, server_url: str = "") -> tuple[Optional[str], str]:
+    """Log in to Bitwarden and return (session_token, error_message).
+
+    If server_url is provided, runs `bw config server` first (for self-hosted Vaultwarden).
+    """
+    if server_url:
+        ok, cfg_err = bw_configure_server(server_url)
+        if not ok:
+            return None, f"Server config failed: {cfg_err}"
+    try:
+        result = subprocess.run(
+            ["bw", "login", email, master_password, "--raw"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip(), ""
+        # Combine stdout + stderr so the caller always gets something useful
+        err = " | ".join(filter(None, [result.stderr.strip(), result.stdout.strip()]))
+        return None, err or f"exit code {result.returncode}"
+    except Exception as exc:
+        return None, str(exc)
+
+
 def bw_get_session() -> Optional[str]:
     session = os.environ.get("BW_SESSION", "").strip()
     if session:
@@ -30,17 +82,19 @@ def bw_get_session() -> Optional[str]:
     return None
 
 
-def bw_unlock(master_password: str) -> Optional[str]:
+def bw_unlock(master_password: str) -> tuple[Optional[str], str]:
+    """Unlock vault and return (session_token, error_message)."""
     try:
         result = subprocess.run(
             ["bw", "unlock", master_password, "--raw"],
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception:
-        pass
-    return None
+            return result.stdout.strip(), ""
+        err = result.stderr.strip() or result.stdout.strip()
+        return None, err
+    except Exception as exc:
+        return None, str(exc)
 
 
 def bw_search_item(session: str, item_name: Optional[str] = None, uri: Optional[str] = None) -> Optional[dict]:

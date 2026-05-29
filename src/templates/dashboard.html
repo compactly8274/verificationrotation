@@ -55,22 +55,46 @@
   <article aria-busy="true"></article>
 </div>
 
-<!-- Bitwarden Unlock Modal -->
+<!-- Bitwarden Modal (login or unlock depending on state) -->
 <dialog id="bw-modal">
   <article>
     <header>
       <button aria-label="Close" rel="prev" onclick="closeBwModal()"></button>
-      <h3>Unlock Bitwarden</h3>
+      <h3 id="bw-modal-title">Bitwarden</h3>
     </header>
-    <form id="bw-form" onsubmit="submitBwUnlock(event)">
+
+    <!-- Login form (shown when not logged in) -->
+    <form id="bw-login-form" onsubmit="submitBwLogin(event)" style="display:none">
+      <p style="color:var(--pico-muted-color);font-size:.9rem">Not logged in. Enter your Bitwarden email and master password.</p>
+      <label>
+        Email
+        <input type="email" id="bw-email" name="email" placeholder="you@example.com" required autocomplete="username">
+      </label>
       <label>
         Master password
-        <input type="password" id="bw-master-password" name="master_password" placeholder="Your Bitwarden master password" required>
+        <input type="password" id="bw-login-password" name="master_password" placeholder="Master password" required autocomplete="current-password">
+      </label>
+      <label>
+        Server URL <small style="color:var(--pico-muted-color)">(optional — for self-hosted Vaultwarden)</small>
+        <input type="url" id="bw-server-url" name="server_url" placeholder="https://vault.example.com" autocomplete="off">
+      </label>
+      <footer>
+        <button type="submit" class="primary">Login &amp; Unlock</button>
+      </footer>
+    </form>
+
+    <!-- Unlock form (shown when logged in but locked) -->
+    <form id="bw-unlock-form" onsubmit="submitBwUnlock(event)" style="display:none">
+      <p id="bw-logged-in-as" style="color:var(--pico-muted-color);font-size:.9rem"></p>
+      <label>
+        Master password
+        <input type="password" id="bw-master-password" name="master_password" placeholder="Master password" required autocomplete="current-password">
       </label>
       <footer>
         <button type="submit" class="primary">Unlock</button>
       </footer>
     </form>
+
     <pre id="bw-modal-result"></pre>
   </article>
 </dialog>

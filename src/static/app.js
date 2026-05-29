@@ -371,6 +371,8 @@ async function deleteSshKey(id) {
   }
 }
 
+let _bwLoginStatus = 'unauthenticated';
+
 async function loadBwStatus() {
   const badge = document.getElementById('bw-status-badge');
   const text = document.getElementById('bw-status-text');
@@ -380,6 +382,7 @@ async function loadBwStatus() {
   try {
     const res = await fetch('/api/bitwarden/status');
     const data = await res.json();
+    _bwLoginStatus = data.login_status || 'unauthenticated';
     if (!data.available) {
       badge.textContent = 'Not installed';
       badge.className = 'badge stale';
@@ -389,13 +392,21 @@ async function loadBwStatus() {
     } else if (data.unlocked) {
       badge.textContent = 'Unlocked';
       badge.className = 'badge ok';
-      text.textContent = 'Vault is unlocked (' + (data.source === 'memory' ? 'session in memory' : 'session from env') + ').';
+      text.textContent = 'Vault unlocked' + (data.user_email ? ` (${data.user_email})` : '') + '.';
       unlockBtn.style.display = 'none';
       lockBtn.style.display = 'inline-block';
+    } else if (_bwLoginStatus === 'unauthenticated') {
+      badge.textContent = 'Not logged in';
+      badge.className = 'badge stale';
+      text.textContent = 'Not logged in to Bitwarden. Click Login to authenticate.';
+      unlockBtn.textContent = 'Login';
+      unlockBtn.style.display = 'inline-block';
+      lockBtn.style.display = 'none';
     } else {
       badge.textContent = 'Locked';
       badge.className = 'badge stale';
-      text.textContent = 'Vault is locked. Unlock to sync rotated secrets.';
+      text.textContent = 'Vault locked' + (data.user_email ? ` (${data.user_email})` : '') + '. Enter master password to unlock.';
+      unlockBtn.textContent = 'Unlock';
       unlockBtn.style.display = 'inline-block';
       lockBtn.style.display = 'none';
     }
@@ -407,8 +418,23 @@ async function loadBwStatus() {
 }
 
 function openBwModal() {
-  document.getElementById('bw-master-password').value = '';
   document.getElementById('bw-modal-result').textContent = '';
+  const loginForm = document.getElementById('bw-login-form');
+  const unlockForm = document.getElementById('bw-unlock-form');
+  if (_bwLoginStatus === 'unauthenticated') {
+    document.getElementById('bw-modal-title').textContent = 'Login to Bitwarden';
+    loginForm.style.display = 'block';
+    unlockForm.style.display = 'none';
+    document.getElementById('bw-email').value = '';
+    document.getElementById('bw-login-password').value = '';
+    const su = document.getElementById('bw-server-url');
+    if (su) su.value = '';
+  } else {
+    document.getElementById('bw-modal-title').textContent = 'Unlock Bitwarden';
+    loginForm.style.display = 'none';
+    unlockForm.style.display = 'block';
+    document.getElementById('bw-master-password').value = '';
+  }
   document.getElementById('bw-modal').showModal();
 }
 
@@ -416,11 +442,36 @@ function closeBwModal() {
   document.getElementById('bw-modal').close();
 }
 
+async function submitBwLogin(event) {
+  event.preventDefault();
+  const email = document.getElementById('bw-email').value;
+  const password = document.getElementById('bw-login-password').value;
+  const serverUrl = (document.getElementById('bw-server-url') || {}).value || '';
+  const resultPre = document.getElementById('bw-modal-result');
+  resultPre.textContent = serverUrl ? 'Configuring server & logging in…' : 'Logging in…';
+  const form = new FormData();
+  form.append('email', email);
+  form.append('master_password', password);
+  if (serverUrl) form.append('server_url', serverUrl);
+  try {
+    const res = await fetch('/api/bitwarden/login', { method: 'POST', body: form });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      resultPre.textContent = data.message;
+      setTimeout(() => { closeBwModal(); loadBwStatus(); }, 900);
+    } else {
+      resultPre.textContent = 'Error: ' + (data.detail || 'Login failed');
+    }
+  } catch (e) {
+    resultPre.textContent = 'Error: ' + e.message;
+  }
+}
+
 async function submitBwUnlock(event) {
   event.preventDefault();
   const password = document.getElementById('bw-master-password').value;
   const resultPre = document.getElementById('bw-modal-result');
-  resultPre.textContent = 'Unlocking...';
+  resultPre.textContent = 'Unlocking…';
   const form = new FormData();
   form.append('master_password', password);
   try {
