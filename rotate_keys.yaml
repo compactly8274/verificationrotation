@@ -96,6 +96,7 @@ services:
     display_name: Sonarr
     env_var: SONARR_API_KEY
     settings_url: http://192.168.1.104:8989/settings/general
+    docker_name: sonarr
     auto_fetch:
       type: arr_xml
       path: /mnt/user/appdata/sonarr/config.xml
@@ -106,6 +107,7 @@ services:
     display_name: Radarr
     env_var: RADARR_API_KEY
     settings_url: http://192.168.1.104:7878/settings/general
+    docker_name: radarr
     auto_fetch:
       type: arr_xml
       path: /mnt/user/appdata/radarr/config.xml
@@ -116,6 +118,7 @@ services:
     display_name: Lidarr
     env_var: LIDARR_API_KEY
     settings_url: http://192.168.1.104:8686/settings/general
+    docker_name: lidarr
     auto_fetch:
       type: arr_xml
       path: /mnt/user/appdata/lidarr/config.xml
@@ -126,6 +129,7 @@ services:
     display_name: Readarr
     env_var: READARR_API_KEY
     settings_url: http://192.168.1.104:8787/settings/general
+    docker_name: readarr
     auto_fetch:
       type: arr_xml
       path: /mnt/user/appdata/readarr/config.xml
@@ -136,6 +140,7 @@ services:
     display_name: Prowlarr
     env_var: PROWLARR_API_KEY
     settings_url: http://192.168.1.122:9696/settings/general
+    docker_name: prowlarr
     auto_fetch:
       type: arr_xml
       path: /mnt/user/appdata/prowlarr/config.xml
@@ -174,6 +179,7 @@ services:
     display_name: Whisparr
     env_var: WHISPARR_API_KEY
     settings_url: http://192.168.1.104:6969/settings/general
+    docker_name: whisparr
     auto_fetch:
       type: arr_xml
       path: /mnt/user/appdata/whisparr/config.xml
@@ -368,6 +374,7 @@ services:
     display_name: Syncthing
     env_var: SYNCTHING_API_KEY
     settings_url: http://192.168.1.104:8384
+    docker_name: syncthing
     auto_fetch:
       type: xml_tag
       path: /mnt/user/appdata/syncthing/config.xml

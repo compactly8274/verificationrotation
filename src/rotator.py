@@ -89,20 +89,47 @@ def _restore_from_backup(backup_dir: Path, targets: list[Path]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Docker restart
+# Docker stop / start / restart
 # ---------------------------------------------------------------------------
+
+def _docker_client():
+    import docker
+    return docker.from_env()
+
+
+def stop_docker_container(name: str) -> bool:
+    if not name:
+        return False
+    try:
+        container = _docker_client().containers.get(name)
+        container.stop(timeout=30)
+        print(f"  ✓ Stopped Docker container '{name}'")
+        return True
+    except Exception as exc:
+        print(f"  WARNING: Could not stop Docker container '{name}': {exc}")
+        return False
+
+
+def start_docker_container(name: str) -> bool:
+    if not name:
+        return False
+    try:
+        container = _docker_client().containers.get(name)
+        container.start()
+        print(f"  ✓ Started Docker container '{name}'")
+        return True
+    except Exception as exc:
+        print(f"  WARNING: Could not start Docker container '{name}': {exc}")
+        return False
+
 
 def restart_docker_container(name: str) -> None:
     if not name:
         return
     try:
-        import docker
-        client = docker.from_env()
-        container = client.containers.get(name)
+        container = _docker_client().containers.get(name)
         container.restart()
         print(f"  ✓ Restarted Docker container '{name}'")
-    except docker.errors.NotFound:
-        print(f"  WARNING: Docker container '{name}' not found")
     except Exception as exc:
         print(f"  WARNING: Could not restart Docker container '{name}': {exc}")
 
@@ -490,8 +517,12 @@ def rotate(
             logger.info("Auto-read new key from config file for %s", svc.env_var)
             print(f"  ✓ Auto-read new key from config file ({svc.env_var})")
         elif svc.auto_write and non_interactive:
-            # Config file still has the old key — generate a new one and write it now.
-            # *arr apps use 32-char lowercase hex keys; secrets.token_hex(16) matches that format.
+            # *arr apps hold the API key in memory and write it back to config.xml on
+            # graceful shutdown. Stop the container first so it can't overwrite our change.
+            if svc.docker_name:
+                print(f"  Stopping '{svc.docker_name}' before writing config file...")
+                stop_docker_container(svc.docker_name)
+            # *arr apps use 32-char lowercase hex keys; secrets.token_hex(16) matches.
             generated = secrets.token_hex(16)
             if svc.auto_write(generated):
                 local_new_key = generated
@@ -499,6 +530,8 @@ def rotate(
                 print(f"  ✓ Generated and wrote new API key to config file ({svc.env_var})")
             else:
                 print(f"  ✗ auto_write failed — could not update config file for {svc.env_var}")
+                if svc.docker_name:
+                    start_docker_container(svc.docker_name)  # restore service even on failure
                 log_audit(env_path, service_id, _key_hash(old_key), "", 0, 0, False, "auto_write to config file failed")
                 send_notification("rotation_failed", svc.display_name, "auto_write to config file failed", service_id=service_id)
                 return False

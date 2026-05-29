@@ -128,7 +128,8 @@ async function submitRotate(event) {
   try {
     const res = await fetch(`/api/rotate/${serviceId}`, { method: 'POST', body: form });
     const data = await res.json();
-    resultPre.textContent = JSON.stringify(data, null, 2);
+    const status = data.success ? '✓ Success' : '✗ Failed';
+    resultPre.textContent = `${status}\n\n${data.log || ''}`.trim();
     if (data.success && !dryRun) {
       setTimeout(loadServices, 500);
     }

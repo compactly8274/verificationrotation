@@ -1,8 +1,10 @@
 """FastAPI application for verificationrotation web service."""
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
@@ -583,21 +585,24 @@ async def api_rotate(
         rotation_in_progress = {"service_id": service_id, "started_at": datetime.now()}
 
     rotation_log = {}
+    _buf = io.StringIO()
     try:
-        ok = rotate(
-            service_id, svc, env, settings.env_file, scan_index,
-            rotation_log=rotation_log,
-            dry_run=dry_run,
-            non_interactive=True,
-            generate_passwords=generate_password,
-            bw_session=bw_session,
-            new_key=new_value,
-            remote_hosts=db_hosts,
-            known_hits=known_hits,
-        )
+        with contextlib.redirect_stdout(_buf):
+            ok = rotate(
+                service_id, svc, env, settings.env_file, scan_index,
+                rotation_log=rotation_log,
+                dry_run=dry_run,
+                non_interactive=True,
+                generate_passwords=generate_password,
+                bw_session=bw_session,
+                new_key=new_value,
+                remote_hosts=db_hosts,
+                known_hits=known_hits,
+            )
     finally:
         if not dry_run:
             rotation_in_progress = None
+    rotation_output = _buf.getvalue()
 
     async with async_session() as session:
         if not dry_run:
@@ -625,7 +630,7 @@ async def api_rotate(
                 ))
         await session.commit()
 
-    return {"success": ok, "dry_run": dry_run}
+    return {"success": ok, "dry_run": dry_run, "log": rotation_output}
 
 
 @app.post("/api/rotate-all")
