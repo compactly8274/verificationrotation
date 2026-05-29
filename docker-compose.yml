@@ -7,11 +7,6 @@ services:
       - "8000:8000"
     env_file:
       - .env
-    environment:
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
-      - RESET_KEY=${RESET_KEY}
-      - BW_SESSION=${BW_SESSION}
-      - SECRET_KEY=${SECRET_KEY:-change-me-in-production}
     volumes:
       - /mnt/user/appdata:/mnt/user/appdata
       - /var/run/docker.sock:/var/run/docker.sock:ro
