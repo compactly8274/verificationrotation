@@ -97,10 +97,28 @@ def require_auth(request: Request):
 
 
 def get_bw_session() -> Optional[str]:
-    """Return in-memory session first, then fall back to env-var session."""
+    """Return in-memory session, falling back to env-var session, then auto-auth from config."""
+    global _bw_session
     if _bw_session:
         return _bw_session
-    return bw_get_session()
+    env_session = bw_get_session()
+    if env_session:
+        _bw_session = env_session
+        return _bw_session
+    # If API key credentials are pre-configured, authenticate transparently
+    if settings.bw_client_id and settings.bw_client_secret and settings.bw_master_password:
+        session, err = bw_login_apikey(
+            settings.bw_client_id,
+            settings.bw_client_secret,
+            settings.bw_master_password,
+            server_url=settings.bw_server_url,
+        )
+        if session:
+            _bw_session = session
+            logger.info("Bitwarden session auto-refreshed via configured API key")
+            return session
+        logger.warning("Bitwarden auto-refresh failed: %s", err)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +129,12 @@ def get_bw_session() -> Optional[str]:
 async def lifespan(app: FastAPI):
     await init_db()
     await _seed_services()
+    # Warm up Bitwarden session from pre-configured credentials (runs in thread pool
+    # so the slow bw CLI calls don't block the event loop at startup)
+    if settings.bw_client_id and settings.bw_client_secret and settings.bw_master_password:
+        import asyncio
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, get_bw_session)
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         _background_scan, "interval",
@@ -427,12 +451,14 @@ async def api_bw_status(request: Request):
     available = bw_available()
     cli_status = bw_status() if available else {"status": "unauthenticated", "userEmail": ""}
     session = get_bw_session()
+    auto_configured = bool(settings.bw_client_id and settings.bw_client_secret and settings.bw_master_password)
     return {
         "available": available,
         "unlocked": bool(session),
         "login_status": cli_status["status"],   # unauthenticated | locked | unlocked
         "user_email": cli_status["userEmail"],
         "source": "memory" if _bw_session else ("env" if session else None),
+        "auto_configured": auto_configured,  # true when .env contains all API key credentials
     }
 
 

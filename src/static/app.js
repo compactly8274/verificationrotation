@@ -384,6 +384,7 @@ async function loadBwStatus() {
     const res = await fetch('/api/bitwarden/status');
     const data = await res.json();
     _bwLoginStatus = data.login_status || 'unauthenticated';
+    const autoTag = data.auto_configured ? ' <small style="opacity:.6">(auto)</small>' : '';
     if (!data.available) {
       badge.textContent = 'Not installed';
       badge.className = 'badge stale';
@@ -393,9 +394,15 @@ async function loadBwStatus() {
     } else if (data.unlocked) {
       badge.textContent = 'Unlocked';
       badge.className = 'badge ok';
-      text.textContent = 'Vault unlocked' + (data.user_email ? ` (${data.user_email})` : '') + '.';
+      text.innerHTML = 'Vault unlocked' + (data.user_email ? ` (${data.user_email})` : '') + '.' + autoTag;
       unlockBtn.style.display = 'none';
       lockBtn.style.display = 'inline-block';
+    } else if (data.auto_configured) {
+      badge.textContent = 'Reconnecting…';
+      badge.className = 'badge stale';
+      text.innerHTML = 'API key credentials are configured — reconnecting automatically.' + autoTag;
+      unlockBtn.style.display = 'none';
+      lockBtn.style.display = 'none';
     } else if (_bwLoginStatus === 'unauthenticated') {
       badge.textContent = 'Not logged in';
       badge.className = 'badge stale';
