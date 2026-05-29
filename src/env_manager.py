@@ -33,11 +33,12 @@ def write_env(path: Path, updates: dict[str, str]) -> None:
         if stripped and not stripped.startswith("#") and "=" in stripped:
             k = stripped.split("=", 1)[0].strip()
             if k in updates:
-                out.append(f"{k}={updates[k]}")
+                v = updates[k]
+                out.append(f'{k}="{v}"')
                 written.add(k)
                 continue
         out.append(line)
     for k, v in updates.items():
         if k not in written:
-            out.append(f"{k}={v}")
+            out.append(f'{k}="{v}"')
     path.write_text("\n".join(out) + "\n")

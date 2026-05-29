@@ -163,6 +163,8 @@ def load_rotate_keys_config(path: Path) -> tuple:
             auto_fetch=_build_auto_fetch(raw.get("auto_fetch")),
             db_refs=db_refs,
             note=raw.get("note", ""),
+            health_url=raw.get("health_url", ""),
+            docker_name=raw.get("docker_name", ""),
             bitwarden=raw.get("bitwarden", {}),
         )
 

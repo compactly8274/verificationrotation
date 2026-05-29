@@ -1,3 +1,10 @@
+// HTML-escape to prevent XSS — all dynamic values pass through this
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
 async function loadServices() {
   const container = document.getElementById('services-container');
   container.innerHTML = '<article aria-busy="true"></article>';
@@ -30,14 +37,14 @@ function renderServices(services) {
       <article class="service-card">
         <header>
           <div>
-            <h4><span class="status-dot ${svc.status}"></span>${svc.display_name}${staleWarning}${autoScheduled}</h4>
-            <small class="hit-count">Refs: ${svc.hit_count} | Last rotated: ${ageText}</small>
+            <h4><span class="status-dot ${esc(svc.status)}"></span>${esc(svc.display_name)}${staleWarning}${autoScheduled}</h4>
+            <small class="hit-count">Refs: ${Number(svc.hit_count)} | Last rotated: ${esc(ageText)}</small>
           </div>
           <div>
-            <button class="secondary outline" onclick="openModal('${svc.id}', '${svc.display_name}')">Rotate</button>
+            <button class="secondary outline" onclick="openModal('${esc(svc.id)}', '${esc(svc.display_name)}')">Rotate</button>
           </div>
         </header>
-        ${svc.settings_url ? `<p><a href="${svc.settings_url}" target="_blank">Open settings</a></p>` : ''}
+        ${svc.settings_url ? `<p><a href="${esc(svc.settings_url)}" target="_blank" rel="noopener noreferrer">Open settings</a></p>` : ''}
       </article>
     `;
   }
@@ -176,14 +183,14 @@ function renderHosts(hosts) {
     const sd = JSON.stringify(h.search_dirs).replace(/"/g, '&quot;');
     const dr = JSON.stringify(h.db_refs).replace(/"/g, '&quot;');
     html += `
-      <tr data-id="${h.id}" data-label="${h.label}" data-host="${h.host}" data-user="${h.user}" data-searchdirs="${sd}" data-dbrefs="${dr}">
-        <td>${h.label}</td>
-        <td>${h.host}</td>
-        <td>${h.user}</td>
-        <td><code>${h.search_dirs.join(', ')}</code></td>
+      <tr data-id="${Number(h.id)}" data-label="${esc(h.label)}" data-host="${esc(h.host)}" data-user="${esc(h.user)}" data-searchdirs="${sd}" data-dbrefs="${dr}">
+        <td>${esc(h.label)}</td>
+        <td>${esc(h.host)}</td>
+        <td>${esc(h.user)}</td>
+        <td><code>${h.search_dirs.map(d => esc(d)).join(', ')}</code></td>
         <td>
           <button class="secondary outline" onclick="editHostFromRow(this.closest('tr'))">Edit</button>
-          <button class="secondary outline" onclick="deleteHost(${h.id})">Delete</button>
+          <button class="secondary outline" onclick="deleteHost(${Number(h.id)})">Delete</button>
         </td>
       </tr>
     `;
@@ -213,8 +220,8 @@ function editHostFromRow(row) {
   document.getElementById('host-label').value = row.dataset.label;
   document.getElementById('host-host').value = row.dataset.host;
   document.getElementById('host-user').value = row.dataset.user;
-  document.getElementById('host-search-dirs').value = row.dataset.searchdirs.replace(/&quot;/g, '"');
-  document.getElementById('host-db-refs').value = row.dataset.dbrefs.replace(/&quot;/g, '"');
+  document.getElementById('host-search-dirs').value = row.dataset.searchdirs;
+  document.getElementById('host-db-refs').value = row.dataset.dbrefs;
   document.getElementById('host-modal-title').textContent = 'Edit Host';
   document.getElementById('host-modal-result').textContent = '';
   document.getElementById('host-modal').showModal();
@@ -286,13 +293,13 @@ function renderSshKeys(keys) {
   let html = '<table><thead><tr><th>Name</th><th>Public Key</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
   for (const k of keys) {
     html += `
-      <tr data-id="${k.id}" data-name="${k.name}" data-public="${k.public_key.replace(/"/g, '&quot;')}">
-        <td>${k.name}</td>
-        <td><code>${k.public_key.slice(0, 40)}...</code></td>
+      <tr data-id="${Number(k.id)}" data-name="${esc(k.name)}" data-public="${esc(k.public_key)}">
+        <td>${esc(k.name)}</td>
+        <td><code>${esc(k.public_key.slice(0, 40))}...</code></td>
         <td>${new Date(k.created_at).toLocaleString()}</td>
         <td>
           <button class="secondary outline" onclick="showSshKeyFromRow(this.closest('tr'))">Show</button>
-          <button class="secondary outline" onclick="deleteSshKey(${k.id})">Delete</button>
+          <button class="secondary outline" onclick="deleteSshKey(${Number(k.id)})">Delete</button>
         </td>
       </tr>
     `;

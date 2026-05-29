@@ -1,6 +1,8 @@
 """Application configuration via Pydantic Settings."""
 
+import logging
 import os
+import secrets
 from pathlib import Path
 
 from pydantic import Field
@@ -42,3 +44,13 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# Warn and auto-generate if the secret key is still the default
+if settings.secret_key == "change-me-in-production":
+    generated = secrets.token_urlsafe(32)
+    logger = logging.getLogger("verificationrotation")
+    logger.warning(
+        "SECRET_KEY is set to the default value. A random key has been generated for this session. "
+        "Set SECRET_KEY in your .env file for persistent sessions."
+    )
+    settings.secret_key = generated

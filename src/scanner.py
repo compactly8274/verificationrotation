@@ -1,6 +1,7 @@
 """Filesystem and database scanning for secret references."""
 
 import hashlib
+import logging
 import itertools
 import json
 import os
@@ -15,10 +16,25 @@ from typing import Optional
 
 from src.services_registry import load_rotate_keys_config
 
+logger = logging.getLogger("verificationrotation")
+
 # ---------------------------------------------------------------------------
 # Boundary-safe regex
 # ---------------------------------------------------------------------------
 _BOUNDARY = r'(?<![A-Za-z0-9_\-./]){}(?![A-Za-z0-9_\-./])'
+
+# Allowed characters for SQL identifiers (table/column names) used in db_refs.
+# Prevents SQL injection from user-controlled host db_refs configurations.
+_SAFE_SQL_IDENTIFIER = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+
+
+def _validate_db_ref(db_path: str, table: str, column: str) -> tuple[str, str, str]:
+    """Validate a db_ref tuple, raising ValueError on unsafe identifiers."""
+    if not _SAFE_SQL_IDENTIFIER.match(table):
+        raise ValueError(f"Invalid SQL table name in db_refs: {table!r}")
+    if not _SAFE_SQL_IDENTIFIER.match(column):
+        raise ValueError(f"Invalid SQL column name in db_refs: {column!r}")
+    return (db_path, table, column)
 
 
 def _key_pattern(key: str) -> re.Pattern:
@@ -79,6 +95,7 @@ def save_scan_cache(index: ScanIndex, keys: set[str], path: Path) -> None:
             "local_dbs": index.local_dbs,
             "remote_files": index.remote_files,
             "remote_dbs": index.remote_dbs,
+            "scan_errors": index.scan_errors,
         }
         path.write_text(json.dumps(payload, indent=2))
     except OSError:
@@ -100,6 +117,7 @@ def load_scan_cache(keys: set[str], path: Path, max_age_hours: float) -> Optiona
         local_dbs=data["local_dbs"],
         remote_files=data["remote_files"],
         remote_dbs=data["remote_dbs"],
+        scan_errors=data.get("scan_errors", []),
     )
 
 
@@ -154,7 +172,7 @@ def scan_dbs_for_keys(key_db_refs: dict[str, list]) -> dict[str, list[str]]:
     ref_keys: dict[tuple, list[str]] = {}
     for key, refs in key_db_refs.items():
         for ref in refs:
-            ref_keys.setdefault(tuple(ref), []).append(key)
+            ref_keys.setdefault(tuple(_validate_db_ref(*ref)), []).append(key)
 
     result: dict[str, list[str]] = {k: [] for k in key_db_refs}
     for (db_path, table, col), keys in ref_keys.items():
