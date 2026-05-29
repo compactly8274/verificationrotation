@@ -2,7 +2,7 @@
 
 import logging
 
-from sqlalchemy import inspect, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -15,33 +15,44 @@ DATABASE_URL = f"sqlite+aiosqlite:///{settings.data_dir / 'verificationrotation.
 engine = create_async_engine(DATABASE_URL, echo=False)
 async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
+# Columns that may be missing from older databases.
+# Format: (table_name, column_name, sql_type)
+_MIGRATIONS = [
+    ("scan_log", "error_message", "TEXT"),
+    ("scan_log", "scan_errors", "TEXT"),
+    ("services", "settings_url", "VARCHAR"),
+    ("services", "docker_name", "VARCHAR"),
+    ("services", "health_url", "VARCHAR"),
+]
 
-async def _migrate(conn):
-    """Add missing columns and tables that were introduced after the initial schema."""
+
+def _run_migrations(sync_conn):
+    """Add missing columns to existing tables (runs inside run_sync)."""
     from src.models import Base
 
-    # Ensure all new tables exist
-    await conn.run_sync(Base.metadata.create_all)
+    # Ensure all tables exist (creates new ones, silently skips existing)
+    Base.metadata.create_all(sync_conn)
 
-    # Add columns that may be missing from older databases
-    inspector = inspect(conn.sync_connection)
-    migrations = [
-        ("scan_log", "error_message", "TEXT"),
-        ("scan_log", "scan_errors", "TEXT"),
-        ("services", "settings_url", "VARCHAR"),
-        ("services", "docker_name", "VARCHAR"),
-        ("services", "health_url", "VARCHAR"),
-    ]
-    for table, column, col_type in migrations:
-        if table not in inspector.get_table_names():
+    # Check existing columns and add any that are missing
+    result = sync_conn.execute(text("PRAGMA table_info('scan_log')"))
+    scan_log_cols = {row[1] for row in result}
+
+    result = sync_conn.execute(text("PRAGMA table_info('services')"))
+    services_cols = {row[1] for row in result}
+
+    existing = {"scan_log": scan_log_cols, "services": services_cols}
+
+    for table, column, col_type in _MIGRATIONS:
+        if table not in existing:
             continue
-        existing = {c["name"] for c in inspector.get_columns(table)}
-        if column not in existing:
-            await conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+        if column not in existing[table]:
+            sync_conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
             logger.info("Migrated: added %s.%s", table, column)
+
+    sync_conn.commit()
 
 
 async def init_db():
     """Create tables if they don't exist and apply any missing migrations."""
     async with engine.begin() as conn:
-        await _migrate(conn)
+        await conn.run_sync(_run_migrations)
