@@ -24,9 +24,11 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from src.bitwarden import bw_available, bw_get_session, bw_login, bw_login_apikey, bw_status, bw_unlock
 from src.config import settings
+from src.crypto import decrypt_value, encrypt_value, mask_value
 from src.database import async_session, init_db
-from src.env_manager import read_env
-from src.models import RemoteHost, RotationHistory, ScanLog, Service, SSHKey
+from src.env_manager import read_env, write_env
+from src.key_discovery import discover_keys
+from src.models import DiscoveredKey, RemoteHost, RotationHistory, ScanLog, Service, SSHKey
 from src.notifications import send_notification
 from src.rotator import generate_password, is_password_service, rotate
 from src.scanner import ScanIndex, build_scan_index
@@ -905,6 +907,120 @@ async def api_ssh_keys_delete(request: Request, key_id: int):
             raise HTTPException(status_code=404, detail="Key not found")
         delete_ssh_key(row.name)
         await session.delete(row)
+        await session.commit()
+    return {"success": True}
+
+
+# ---------------------------------------------------------------------------
+# API — Key Discovery
+# ---------------------------------------------------------------------------
+
+@app.get("/discovery", response_class=HTMLResponse)
+async def discovery_page(request: Request):
+    if not is_authenticated(request):
+        return RedirectResponse(url="/login", status_code=303)
+    return templates.TemplateResponse(request, "discovery.html")
+
+
+@app.post("/api/discover-keys")
+async def api_discover_keys(
+    request: Request,
+    search_dirs: Optional[str] = Form(None),
+):
+    """Run key discovery and persist results (encrypted) in the DB."""
+    require_auth(request)
+
+    raw_dirs = search_dirs or settings.discovery_search_dirs
+    dir_list = [d.strip() for d in raw_dirs.replace(":", ",").split(",") if d.strip()]
+    skip_set = {
+        s.strip()
+        for s in settings.discovery_skip_dirs.split(",")
+        if s.strip()
+    }
+
+    _, _, _, _, services = load_rotate_keys_config(settings.descriptions_path)
+    env = read_env(settings.env_file)
+
+    loop = asyncio.get_event_loop()
+    results = await loop.run_in_executor(
+        None,
+        lambda: discover_keys(services, env, dir_list, skip_set),
+    )
+
+    stored = []
+    async with async_session() as session:
+        for r in results:
+            encrypted = encrypt_value(r.value)
+            dk = DiscoveredKey(
+                service_id=r.service_id,
+                env_var=r.env_var,
+                display_name=r.display_name,
+                value_encrypted=encrypted,
+                source_file=r.source_file,
+                confidence=r.confidence,
+                strategy=r.strategy,
+            )
+            session.add(dk)
+            stored.append({
+                "service_id": r.service_id,
+                "env_var": r.env_var,
+                "display_name": r.display_name,
+                "value_masked": mask_value(r.value),
+                "source_file": r.source_file,
+                "confidence": r.confidence,
+                "strategy": r.strategy,
+            })
+        await session.commit()
+
+    return {"found": len(results), "results": stored}
+
+
+@app.get("/api/discovered-keys")
+async def api_list_discovered_keys(request: Request):
+    """Return cached discovered keys (values masked — never returned in plaintext)."""
+    require_auth(request)
+    async with async_session() as session:
+        rows = (await session.execute(select(DiscoveredKey))).scalars().all()
+        return [
+            {
+                "id": r.id,
+                "service_id": r.service_id,
+                "env_var": r.env_var,
+                "display_name": r.display_name,
+                "value_masked": mask_value(decrypt_value(r.value_encrypted)),
+                "source_file": r.source_file,
+                "confidence": r.confidence,
+                "strategy": r.strategy,
+                "discovered_at": r.discovered_at.isoformat() if r.discovered_at else None,
+                "applied_at": r.applied_at.isoformat() if r.applied_at else None,
+            }
+            for r in rows
+        ]
+
+
+@app.post("/api/discovered-keys/{key_id}/apply")
+async def api_apply_discovered_key(request: Request, key_id: int):
+    """Write a discovered key's plaintext value into the .env file."""
+    require_auth(request)
+    async with async_session() as session:
+        row = await session.get(DiscoveredKey, key_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Discovered key not found")
+        plaintext = decrypt_value(row.value_encrypted)
+        write_env(settings.env_file, {row.env_var: plaintext})
+        row.applied_at = datetime.now()
+        await session.commit()
+    logger.info("Applied discovered key for %s (%s) to %s", row.env_var, row.service_id, settings.env_file)
+    return {"success": True, "env_var": row.env_var}
+
+
+@app.delete("/api/discovered-keys")
+async def api_clear_discovered_keys(request: Request):
+    """Remove all cached discovery results from the DB."""
+    require_auth(request)
+    from sqlalchemy import delete as sa_delete
+    async with async_session() as session:
+        await session.execute(sa_delete(DiscoveredKey))
         await session.commit()
     return {"success": True}
 

@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+
+{% block title %}Key Discovery — VerificationRotation{% endblock %}
+
+{% block content %}
+<nav>
+  <ul>
+    <li><a href="/">VerificationRotation</a></li>
+    <li><strong>Key Discovery</strong></li>
+  </ul>
+  <ul>
+    <li><a href="/logout" role="button" class="secondary outline">Logout</a></li>
+  </ul>
+</nav>
+
+<div class="grid">
+  <div>
+    <h2>Key Discovery</h2>
+    <p>Scan config files, .env files, docker-compose files, and structured data (JSON/YAML/TOML/INI) to find API keys that differ from your current <code>.env</code>.</p>
+  </div>
+</div>
+
+<article>
+  <header><h4>Run Discovery Scan</h4></header>
+  <label>
+    Search directories
+    <small style="color:var(--pico-muted-color)"> — comma or colon-separated paths to scan (leave blank for configured default)</small>
+    <input type="text" id="scan-dirs" placeholder="/config,/data,/home">
+  </label>
+  <footer>
+    <button id="btn-scan" class="primary" onclick="runDiscoveryScan()">Scan Now</button>
+    <button class="secondary outline" onclick="loadDiscoveredKeys()">Refresh Results</button>
+    <button class="contrast outline" onclick="clearDiscoveredKeys()" style="margin-left:auto">Clear Cache</button>
+  </footer>
+</article>
+
+<div id="scan-progress" style="display:none">
+  <article aria-busy="true">Scanning filesystem for API keys… this may take a minute.</article>
+</div>
+
+<div id="scan-result-banner" style="display:none;margin-bottom:1rem"></div>
+
+<div id="discovered-container">
+  <article aria-busy="true"></article>
+</div>
+
+<script>
+async function runDiscoveryScan() {
+  const btn = document.getElementById('btn-scan');
+  const progress = document.getElementById('scan-progress');
+  const banner = document.getElementById('scan-result-banner');
+  btn.disabled = true;
+  btn.setAttribute('aria-busy', 'true');
+  progress.style.display = '';
+  banner.style.display = 'none';
+
+  const dirs = document.getElementById('scan-dirs').value.trim();
+  const body = new FormData();
+  if (dirs) body.append('search_dirs', dirs);
+
+  try {
+    const res = await fetch('/api/discover-keys', { method: 'POST', body });
+    const data = await res.json();
+    if (res.ok) {
+      banner.style.cssText = 'display:block;padding:.75rem 1rem;border-radius:var(--pico-border-radius);background:var(--pico-ins-color,#27ae60);color:#fff;margin-bottom:1rem';
+      banner.textContent = `Scan complete — found ${data.found} new key(s).`;
+      await loadDiscoveredKeys();
+    } else {
+      banner.style.cssText = 'display:block;padding:.75rem 1rem;border-radius:var(--pico-border-radius);background:var(--pico-del-color,#c0392b);color:#fff;margin-bottom:1rem';
+      banner.textContent = data.detail || 'Scan failed.';
+    }
+  } catch (err) {
+    banner.style.cssText = 'display:block;padding:.75rem 1rem;border-radius:var(--pico-border-radius);background:var(--pico-del-color,#c0392b);color:#fff;margin-bottom:1rem';
+    banner.textContent = 'Network error: ' + err;
+  } finally {
+    btn.disabled = false;
+    btn.removeAttribute('aria-busy');
+    progress.style.display = 'none';
+  }
+}
+
+async function loadDiscoveredKeys() {
+  const container = document.getElementById('discovered-container');
+  container.innerHTML = '<article aria-busy="true"></article>';
+  try {
+    const res = await fetch('/api/discovered-keys');
+    const keys = await res.json();
+    if (!keys.length) {
+      container.innerHTML = '<p style="color:var(--pico-muted-color)">No discovered keys in cache. Run a scan to populate.</p>';
+      return;
+    }
+    let html = `<div style="overflow-x:auto"><table>
+      <thead><tr>
+        <th>Service</th>
+        <th>Env Var</th>
+        <th>Discovered Value</th>
+        <th>Source</th>
+        <th>Confidence</th>
+        <th>Strategy</th>
+        <th>Applied</th>
+        <th></th>
+      </tr></thead><tbody>`;
+    for (const k of keys) {
+      const applied = k.applied_at
+        ? `<span style="color:var(--pico-ins-color,#27ae60)">&#10003; ${new Date(k.applied_at).toLocaleString()}</span>`
+        : '<span style="color:var(--pico-muted-color)">—</span>';
+      const confidence = k.confidence === 'high'
+        ? `<span style="color:var(--pico-ins-color,#27ae60)">${k.confidence}</span>`
+        : `<span style="color:var(--pico-muted-color)">${k.confidence}</span>`;
+      const applyBtn = k.applied_at
+        ? `<button class="secondary outline" style="padding:.25rem .75rem;font-size:.85rem" onclick="applyKey(${k.id})">Re-apply</button>`
+        : `<button class="primary" style="padding:.25rem .75rem;font-size:.85rem" onclick="applyKey(${k.id})">Apply</button>`;
+      const src = k.source_file.length > 50 ? '…' + k.source_file.slice(-50) : k.source_file;
+      html += `<tr>
+        <td>${escHtml(k.display_name || k.service_id)}</td>
+        <td><code>${escHtml(k.env_var)}</code></td>
+        <td><code>${escHtml(k.value_masked)}</code></td>
+        <td title="${escHtml(k.source_file)}" style="font-size:.8rem;color:var(--pico-muted-color)">${escHtml(src)}</td>
+        <td>${confidence}</td>
+        <td><span style="font-size:.8rem">${escHtml(k.strategy)}</span></td>
+        <td style="font-size:.8rem">${applied}</td>
+        <td>${applyBtn}</td>
+      </tr>`;
+    }
+    html += '</tbody></table></div>';
+    container.innerHTML = html;
+  } catch (err) {
+    container.innerHTML = '<p style="color:var(--pico-del-color,#c0392b)">Failed to load discovered keys: ' + err + '</p>';
+  }
+}
+
+async function applyKey(id) {
+  if (!confirm('Write this discovered value to your .env file?\n\nThe app will use the new value after its next restart or reload.')) return;
+  const res = await fetch(`/api/discovered-keys/${id}/apply`, { method: 'POST' });
+  const data = await res.json();
+  if (res.ok) {
+    await loadDiscoveredKeys();
+  } else {
+    alert('Failed to apply key: ' + (data.detail || JSON.stringify(data)));
+  }
+}
+
+async function clearDiscoveredKeys() {
+  if (!confirm('Remove all discovered keys from the cache?')) return;
+  const res = await fetch('/api/discovered-keys', { method: 'DELETE' });
+  if (res.ok) {
+    await loadDiscoveredKeys();
+  }
+}
+
+function escHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+loadDiscoveredKeys();
+</script>
+{% endblock %}
