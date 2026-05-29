@@ -1,6 +1,7 @@
 """Core rotation logic — replace secrets in files, DBs, and remote hosts."""
 
 import hashlib
+import logging
 import os
 import re
 import secrets
@@ -16,8 +17,10 @@ from typing import Optional
 from src.bitwarden import sync_bitwarden
 from src.env_manager import read_env, write_env
 from src.notifications import send_notification
-from src.scanner import ScanIndex, _key_matches, _key_replace, _ssh, build_scan_index
+from src.scanner import ScanIndex, _key_matches, _key_replace, _ssh, _validate_db_ref, build_scan_index
 from src.services_registry import ServiceDef
+
+logger = logging.getLogger("verificationrotation")
 
 
 def generate_password(length: int = 32) -> str:
@@ -45,9 +48,13 @@ def _health_check(url: str, expected_key: Optional[str] = None, timeout: int = 1
     if not url:
         return True, "No health URL configured"
     try:
+        import ssl
         import urllib.request
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
         req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
             body = resp.read().decode("utf-8", errors="ignore")
             if expected_key and expected_key in body:
                 return False, "Response still contains old key"
@@ -125,7 +132,8 @@ def replace_in_files(old: str, new: str, filepaths: list[str]) -> list[str]:
 def replace_in_dbs(old: str, new: str, db_refs: list) -> list[str]:
     changed = []
     seen: set[tuple] = set()
-    for db_path_str, table, col in db_refs:
+    for ref in db_refs:
+        db_path_str, table, col = _validate_db_ref(*ref)
         key = (db_path_str, table, col)
         if key in seen:
             continue
@@ -273,7 +281,8 @@ def _rescan_for_key(key: str, file_hits: list[str], db_refs: list, remote_hosts:
                 remaining.append(fp_str)
         except (PermissionError, OSError):
             pass
-    for db_path_str, table, col in (db_refs or []):
+    for ref in (db_refs or []):
+        db_path_str, table, col = _validate_db_ref(*ref)
         dp = Path(db_path_str)
         if not dp.exists():
             continue
@@ -312,6 +321,8 @@ def _rollback(
     changed_dbs: list[str],
     backup_dir: Optional[Path],
     remote_hosts: list[dict],
+    remote_file_hits: Optional[dict[str, list[str]]] = None,
+    remote_db_hits: Optional[dict[str, list]] = None,
 ) -> None:
     """Restore files from backup and revert .env to old_key."""
     print("  ⟳ Rolling back...")
@@ -319,7 +330,8 @@ def _rollback(
         _restore_from_backup(backup_dir, [Path(f) for f in changed_files])
 
     # Also reverse any DB .bak files
-    for db_path_str, _, _ in (svc.db_refs or []):
+    for ref in (svc.db_refs or []):
+        db_path_str, _, _ = _validate_db_ref(*ref)
         dp = Path(db_path_str)
         bak = dp.with_suffix(".db.bak")
         if bak.exists():
@@ -329,11 +341,18 @@ def _rollback(
 
     # Revert in-memory files that may not have backups
     replace_in_files(local_new_key, old_key, changed_files)
-    replace_in_dbs(local_new_key, old_key, svc.db_refs) if svc.db_refs else []
+    if svc.db_refs:
+        replace_in_dbs(local_new_key, old_key, svc.db_refs)
 
-    # Revert remote
+    # Revert remote — use the actual remote file/DB hits, not local paths
     for rh in remote_hosts:
-        replace_in_remote_files(rh["host"], rh["user"], local_new_key, old_key, changed_files)
+        label = rh["label"]
+        remote_files = (remote_file_hits or {}).get(label, [])
+        remote_dbs = (remote_db_hits or {}).get(label, [])
+        if remote_files:
+            replace_in_remote_files(rh["host"], rh["user"], local_new_key, old_key, remote_files)
+        if remote_dbs:
+            replace_in_remote_dbs(rh["host"], rh["user"], local_new_key, old_key, rh.get("db_refs", []))
 
     # Revert .env
     env[svc.env_var] = old_key
@@ -505,7 +524,8 @@ def rotate(
 
     for f in file_hits:
         _backup_file(Path(f), backup_dir)
-    for db_path_str, _, _ in (svc.db_refs or []):
+    for ref in (svc.db_refs or []):
+        db_path_str, _, _ = _validate_db_ref(*ref)
         dp = Path(db_path_str)
         if dp.exists():
             _backup_file(dp, backup_dir)
@@ -569,7 +589,7 @@ def rotate(
         print(f"  ✗ {msg}")
         for p in still_present:
             print(f"    {p}")
-        _rollback(env_path, env, svc, old_key, local_new_key, changed_files, changed_dbs, backup_dir, remote_hosts)
+        _rollback(env_path, env, svc, old_key, local_new_key, changed_files, changed_dbs, backup_dir, remote_hosts, remote_file_hits=remote_file_hits, remote_db_hits=remote_db_hits)
         log_audit(env_path, service_id, _key_hash(old_key), _key_hash(local_new_key), len(changed_files), len(changed_dbs), False, f"Rolled back: {msg}")
         send_notification("rotation_rollback", svc.display_name, msg, service_id=service_id, still_present=len(still_present))
         return False

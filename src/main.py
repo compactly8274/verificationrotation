@@ -1,6 +1,8 @@
 """FastAPI application for verificationrotation web service."""
 
+import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -44,6 +46,11 @@ auto_rotation_running: bool = False                 # True while auto-rotate job
 
 _bw_session: Optional[str] = None                  # in-memory Bitwarden session token
 
+# Async locks to prevent race conditions on shared state
+_rotation_lock = asyncio.Lock()
+_scan_lock = asyncio.Lock()
+_auto_rotate_lock = asyncio.Lock()
+
 _SCAN_TIMEOUT = timedelta(minutes=settings.scan_timeout_minutes)
 _ROTATION_LOCK_TIMEOUT = timedelta(minutes=10)
 
@@ -69,13 +76,13 @@ def _rotation_is_running() -> bool:
 def verify_password(password: str) -> bool:
     if not settings.admin_password:
         return False
-    return password == settings.admin_password
+    return hmac.compare_digest(password, settings.admin_password)
 
 
 def verify_reset_key(key: str) -> bool:
     if not settings.reset_key:
         return False
-    return key == settings.reset_key
+    return hmac.compare_digest(key, settings.reset_key)
 
 
 def is_authenticated(request: Request) -> bool:
@@ -126,7 +133,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="VerificationRotation", lifespan=lifespan)
-app.add_middleware(SessionMiddleware, secret_key=settings.secret_key, max_age=3600 * 24 * 7)
+app.add_middleware(SessionMiddleware, secret_key=settings.secret_key, max_age=3600 * 24 * 7, same_site="strict", https_only=False)
 app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -188,83 +195,86 @@ async def _background_scan():
     global scan_index, last_scan_time, scan_heartbeat, last_scan_errors
     if _scan_is_running():
         return
-    scan_heartbeat = datetime.now()
-    started = datetime.now()
-    log = ScanLog(started_at=started, status="running")
-    async with async_session() as session:
-        session.add(log)
-        await session.commit()
-        log_id = log.id
-
-    errors: list[str] = []
-    try:
-        _, _, _, _, services = load_rotate_keys_config(settings.descriptions_path)
-        env = read_env(settings.env_file)
-        db_hosts = await _get_db_hosts()
-
+    if _scan_lock.locked():
+        return
+    async with _scan_lock:
         scan_heartbeat = datetime.now()
-
-        index = build_scan_index(
-            services, env,
-            env_path=settings.env_file,
-            skip_remote=False,
-            cache_max_age=settings.cache_max_age_hours,
-            remote_hosts=db_hosts,
-        )
-        scan_index = index
-        last_scan_time = datetime.now()
-        errors = index.scan_errors or []
-
-        if errors:
-            for err in errors:
-                send_notification("scan_error", "Scanner", err)
-
+        started = datetime.now()
+        log = ScanLog(started_at=started, status="running")
         async with async_session() as session:
-            for sid, svc in services.items():
-                if not svc.env_var:
-                    continue
-                key = env.get(svc.env_var, "")
-                total_hits = 0
-                if key:
-                    total_hits += len(index.local_files.get(key, []))
-                    total_hits += len(index.local_dbs.get(key, []))
-                    for label, d in index.remote_files.items():
-                        total_hits += len(d.get(key, []))
-                    for label, d in index.remote_dbs.items():
-                        total_hits += len(d.get(key, []))
+            session.add(log)
+            await session.commit()
+            log_id = log.id
+
+        errors: list[str] = []
+        try:
+            _, _, _, _, services = load_rotate_keys_config(settings.descriptions_path)
+            env = read_env(settings.env_file)
+            db_hosts = await _get_db_hosts()
+
+            scan_heartbeat = datetime.now()
+
+            index = build_scan_index(
+                services, env,
+                env_path=settings.env_file,
+                skip_remote=False,
+                cache_max_age=settings.cache_max_age_hours,
+                remote_hosts=db_hosts,
+            )
+            scan_index = index
+            last_scan_time = datetime.now()
+            errors = index.scan_errors or []
+
+            if errors:
+                for err in errors:
+                    send_notification("scan_error", "Scanner", err)
+
+            async with async_session() as session:
+                for sid, svc in services.items():
+                    if not svc.env_var:
+                        continue
+                    key = env.get(svc.env_var, "")
+                    total_hits = 0
+                    if key:
+                        total_hits += len(index.local_files.get(key, []))
+                        total_hits += len(index.local_dbs.get(key, []))
+                        for label, d in index.remote_files.items():
+                            total_hits += len(d.get(key, []))
+                        for label, d in index.remote_dbs.items():
+                            total_hits += len(d.get(key, []))
+                    await session.execute(
+                        update(Service).where(Service.id == sid).values(hit_count=total_hits)
+                    )
+                await session.commit()
+
+            error_msg = "; ".join(errors) if errors else None
+            status = "completed_with_errors" if errors else "completed"
+            async with async_session() as session:
                 await session.execute(
-                    update(Service).where(Service.id == sid).values(hit_count=total_hits)
+                    update(ScanLog).where(ScanLog.id == log_id).values(
+                        completed_at=datetime.now(),
+                        status=status,
+                        files_scanned=sum(len(v) for v in index.local_files.values()),
+                        keys_found=len(index.local_files),
+                        error_message=error_msg,
+                    )
                 )
-            await session.commit()
-
-        error_msg = "; ".join(errors) if errors else None
-        status = "completed_with_errors" if errors else "completed"
-        async with async_session() as session:
-            await session.execute(
-                update(ScanLog).where(ScanLog.id == log_id).values(
-                    completed_at=datetime.now(),
-                    status=status,
-                    files_scanned=sum(len(v) for v in index.local_files.values()),
-                    keys_found=len(index.local_files),
-                    error_message=error_msg,
+                await session.commit()
+        except Exception as exc:
+            errors = [str(exc)]
+            async with async_session() as session:
+                await session.execute(
+                    update(ScanLog).where(ScanLog.id == log_id).values(
+                        completed_at=datetime.now(),
+                        status="failed",
+                        error_message=str(exc),
+                    )
                 )
-            )
-            await session.commit()
-    except Exception as exc:
-        errors = [str(exc)]
-        async with async_session() as session:
-            await session.execute(
-                update(ScanLog).where(ScanLog.id == log_id).values(
-                    completed_at=datetime.now(),
-                    status="failed",
-                    error_message=str(exc),
-                )
-            )
-            await session.commit()
-        logger.exception("Background scan failed: %s", exc)
-    finally:
-        last_scan_errors = errors
-        scan_heartbeat = None
+                await session.commit()
+            logger.exception("Background scan failed: %s", exc)
+        finally:
+            last_scan_errors = errors
+            scan_heartbeat = None
 
 
 # ---------------------------------------------------------------------------
@@ -274,87 +284,98 @@ async def _background_scan():
 async def _auto_rotate_stale():
     """Rotate stale services one-by-one; skips if any other operation is running."""
     global auto_rotation_running
-    if _scan_is_running() or _rotation_is_running() or auto_rotation_running:
+    if _scan_is_running() or _rotation_is_running() or auto_rotation_running or _auto_rotate_lock.locked():
         logger.info("Auto-rotate skipped — another operation in progress")
         return
-    auto_rotation_running = True
-    try:
-        _, _, _, _, services = load_rotate_keys_config(settings.descriptions_path)
-        env = read_env(settings.env_file)
-        db_hosts = await _get_db_hosts()
+    async with _auto_rotate_lock:
+        auto_rotation_running = True
+        try:
+            _, _, _, _, services = load_rotate_keys_config(settings.descriptions_path)
+            env = read_env(settings.env_file)
+            db_hosts = await _get_db_hosts()
 
-        async with async_session() as session:
-            result = await session.execute(select(Service).where(Service.status == "stale"))
-            stale_rows = result.scalars().all()
+            async with async_session() as session:
+                result = await session.execute(select(Service).where(Service.status == "stale"))
+                stale_rows = result.scalars().all()
 
-        stale_ids: list[str] = [row.id for row in stale_rows]
-        async with async_session() as session:
-            result = await session.execute(select(Service))
-            for row in result.scalars().all():
-                if row.id not in stale_ids and row.last_rotated:
-                    if (datetime.now() - row.last_rotated).days > 180:
-                        stale_ids.append(row.id)
+            stale_ids: list[str] = [row.id for row in stale_rows]
+            async with async_session() as session:
+                result = await session.execute(select(Service))
+                for row in result.scalars().all():
+                    if row.id not in stale_ids and row.last_rotated:
+                        if (datetime.now() - row.last_rotated).days > 180:
+                            stale_ids.append(row.id)
 
-        if not stale_ids:
-            logger.info("Auto-rotate: no stale services found")
-            return
+            if not stale_ids:
+                logger.info("Auto-rotate: no stale services found")
+                return
 
-        logger.info("Auto-rotate: rotating %d stale service(s)", len(stale_ids))
+            logger.info("Auto-rotate: rotating %d stale service(s)", len(stale_ids))
 
-        global scan_index
-        if not scan_index:
-            scan_index = build_scan_index(services, env, env_path=settings.env_file, remote_hosts=db_hosts)
+            global scan_index
+            if not scan_index:
+                scan_index = build_scan_index(services, env, env_path=settings.env_file, remote_hosts=db_hosts)
 
-        # Fetch hit counts for all stale services in one query
-        async with async_session() as session:
-            result = await session.execute(select(Service).where(Service.id.in_(stale_ids)))
-            hit_counts = {row.id: row.hit_count for row in result.scalars().all()}
+            # Fetch hit counts for all stale services in one query
+            async with async_session() as session:
+                result = await session.execute(select(Service).where(Service.id.in_(stale_ids)))
+                hit_counts = {row.id: row.hit_count for row in result.scalars().all()}
 
-        for sid in stale_ids:
-            if sid not in services:
-                continue
-            svc = services[sid]
-            if not svc.env_var or not env.get(svc.env_var):
-                continue
-            if _rotation_is_running():
-                logger.warning("Auto-rotate: rotation lock held, stopping")
-                break
-            global rotation_in_progress
-            rotation_in_progress = {"service_id": sid, "started_at": datetime.now()}
-            try:
-                ok = rotate(
-                    sid, svc, env, settings.env_file, scan_index,
-                    rotation_log={},
-                    dry_run=False,
-                    non_interactive=True,
-                    generate_passwords=True,
-                    bw_session=get_bw_session(),
-                    remote_hosts=db_hosts,
-                    known_hits=hit_counts.get(sid, -1),
-                )
-                if ok:
-                    new_hash = hashlib.sha256(env.get(svc.env_var, "").encode()).hexdigest()[:16]
-                    async with async_session() as session:
-                        await session.execute(
-                            update(Service).where(Service.id == sid).values(
-                                last_rotated=datetime.now(), current_hash=new_hash, status="ok"
+            for sid in stale_ids:
+                if sid not in services:
+                    continue
+                svc = services[sid]
+                if not svc.env_var or not env.get(svc.env_var):
+                    continue
+                if _rotation_is_running():
+                    logger.warning("Auto-rotate: rotation lock held, stopping")
+                    break
+                global rotation_in_progress
+                rotation_in_progress = {"service_id": sid, "started_at": datetime.now()}
+                try:
+                    ok = rotate(
+                        sid, svc, env, settings.env_file, scan_index,
+                        rotation_log={},
+                        dry_run=False,
+                        non_interactive=True,
+                        generate_passwords=True,
+                        bw_session=get_bw_session(),
+                        remote_hosts=db_hosts,
+                        known_hits=hit_counts.get(sid, -1),
+                    )
+                    if ok:
+                        new_hash = hashlib.sha256(env.get(svc.env_var, "").encode()).hexdigest()[:16]
+                        async with async_session() as session:
+                            await session.execute(
+                                update(Service).where(Service.id == sid).values(
+                                    last_rotated=datetime.now(), current_hash=new_hash, status="ok"
+                                )
                             )
-                        )
-                        session.add(RotationHistory(
-                            service_id=sid,
-                            old_hash="",
-                            new_hash=new_hash,
-                            success=1,
-                            message="Auto-rotated (scheduled)",
-                        ))
-                        await session.commit()
-            except Exception as exc:
-                logger.exception("Auto-rotate failed for %s: %s", sid, exc)
-                send_notification("rotation_failed", svc.display_name, str(exc), service_id=sid, source="auto-rotate")
-            finally:
-                rotation_in_progress = None
-    finally:
-        auto_rotation_running = False
+                            session.add(RotationHistory(
+                                service_id=sid,
+                                old_hash="",
+                                new_hash=new_hash,
+                                success=1,
+                                message="Auto-rotated (scheduled)",
+                            ))
+                            await session.commit()
+                    else:
+                        async with async_session() as session:
+                            session.add(RotationHistory(
+                                service_id=sid,
+                                old_hash="",
+                                new_hash="",
+                                success=0,
+                                message="Auto-rotate failed",
+                            ))
+                            await session.commit()
+                except Exception as exc:
+                    logger.exception("Auto-rotate failed for %s: %s", sid, exc)
+                    send_notification("rotation_failed", svc.display_name, str(exc), service_id=sid, source="auto-rotate")
+                finally:
+                    rotation_in_progress = None
+        finally:
+            auto_rotation_running = False
 
 
 # ---------------------------------------------------------------------------
@@ -488,7 +509,7 @@ async def api_rotate(
     require_auth(request)
     global scan_index, rotation_in_progress
 
-    if not dry_run and _rotation_is_running():
+    if not dry_run and (_rotation_is_running() or _rotation_lock.locked()):
         raise HTTPException(
             status_code=409,
             detail=f"Rotation already in progress for '{rotation_in_progress['service_id']}'. Try again shortly.",
@@ -532,20 +553,29 @@ async def api_rotate(
             rotation_in_progress = None
 
     async with async_session() as session:
-        if ok and not dry_run:
-            new_hash = hashlib.sha256((new_value or env.get(svc.env_var, "")).encode()).hexdigest()[:16]
-            await session.execute(
-                update(Service).where(Service.id == service_id).values(
-                    last_rotated=datetime.now(), current_hash=new_hash, status="ok"
+        if not dry_run:
+            if ok:
+                new_hash = hashlib.sha256((new_value or env.get(svc.env_var, "")).encode()).hexdigest()[:16]
+                await session.execute(
+                    update(Service).where(Service.id == service_id).values(
+                        last_rotated=datetime.now(), current_hash=new_hash, status="ok"
+                    )
                 )
-            )
-            session.add(RotationHistory(
-                service_id=service_id,
-                old_hash="",
-                new_hash=new_hash,
-                success=1 if ok else 0,
-                message="Rotated via web UI",
-            ))
+                session.add(RotationHistory(
+                    service_id=service_id,
+                    old_hash="",
+                    new_hash=new_hash,
+                    success=1,
+                    message="Rotated via web UI",
+                ))
+            else:
+                session.add(RotationHistory(
+                    service_id=service_id,
+                    old_hash="",
+                    new_hash="",
+                    success=0,
+                    message="Rotation failed via web UI",
+                ))
         await session.commit()
 
     return {"success": ok, "dry_run": dry_run}
@@ -575,6 +605,11 @@ async def api_rotate_all(
 
     bw_session = get_bw_session() if sync_bitwarden_flag and bw_available() else None
 
+    # Fetch all hit counts upfront (async) so rotate() doesn't need async I/O
+    async with async_session() as session:
+        all_svc_rows = (await session.execute(select(Service))).scalars().all()
+        hit_count_map = {row.id: row.hit_count for row in all_svc_rows}
+
     results = []
     for sid, svc in services.items():
         if not svc.env_var or not env.get(svc.env_var):
@@ -590,6 +625,7 @@ async def api_rotate_all(
                 generate_passwords=generate_password,
                 bw_session=bw_session,
                 remote_hosts=db_hosts,
+                known_hits=hit_count_map.get(sid, -1),
             )
         finally:
             if not dry_run:
@@ -643,6 +679,15 @@ async def api_hosts(request: Request):
         ]
 
 
+def _parse_json_field(value: str, field_name: str) -> str:
+    """Validate and normalize a JSON form field. Returns the canonical JSON string."""
+    try:
+        parsed = json.loads(value)
+        return json.dumps(parsed)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid JSON in {field_name}: {exc}")
+
+
 @app.post("/api/hosts")
 async def api_hosts_create(
     request: Request,
@@ -653,8 +698,10 @@ async def api_hosts_create(
     db_refs: str = Form("[]"),
 ):
     require_auth(request)
+    search_dirs_json = _parse_json_field(search_dirs, "search_dirs")
+    db_refs_json = _parse_json_field(db_refs, "db_refs")
     async with async_session() as session:
-        session.add(RemoteHost(label=label, host=host, user=user, search_dirs=search_dirs, db_refs=db_refs))
+        session.add(RemoteHost(label=label, host=host, user=user, search_dirs=search_dirs_json, db_refs=db_refs_json))
         await session.commit()
     return {"success": True}
 
@@ -670,13 +717,15 @@ async def api_hosts_update(
     db_refs: str = Form("[]"),
 ):
     require_auth(request)
+    search_dirs_json = _parse_json_field(search_dirs, "search_dirs")
+    db_refs_json = _parse_json_field(db_refs, "db_refs")
     async with async_session() as session:
         result = await session.execute(select(RemoteHost).where(RemoteHost.id == host_id))
         row = result.scalar_one_or_none()
         if not row:
             raise HTTPException(status_code=404, detail="Host not found")
         row.label = label; row.host = host; row.user = user
-        row.search_dirs = search_dirs; row.db_refs = db_refs
+        row.search_dirs = search_dirs_json; row.db_refs = db_refs_json
         await session.commit()
     return {"success": True}
 

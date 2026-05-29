@@ -145,7 +145,7 @@ def bw_create_item(session: str, name: str, password: str, uri: Optional[str] = 
         return None
 
 
-def sync_bitwarden(svc: ServiceDef, new_value: str, session: str, env: dict[str, str]) -> tuple[bool, str]:
+def sync_bitwarden(svc: ServiceDef, new_value: str, session: str, env: dict[str, str] | None = None) -> tuple[bool, str]:
     """Sync a rotated secret to Bitwarden. Creates item if missing."""
     cfg = svc.bitwarden
     if not cfg:
