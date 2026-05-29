@@ -1,6 +1,7 @@
 """Service definitions and YAML config loading."""
 
 import os
+import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,6 +19,7 @@ class ServiceDef:
     env_var: str
     settings_url: str
     auto_fetch: Optional[Callable[[], Optional[str]]] = None
+    auto_write: Optional[Callable[[str], bool]] = None  # write a new key into the config file
     db_refs: list = field(default_factory=list)
     note: str = ""
     health_url: str = ""
@@ -84,6 +86,23 @@ def _arr_xml(path: str) -> Callable[[], Optional[str]]:
     return _read
 
 
+def _arr_xml_write(path: str) -> Callable[[str], bool]:
+    """Replace <ApiKey>…</ApiKey> in-place using regex to preserve original formatting."""
+    _pat = re.compile(r'(<ApiKey>)[^<]*(</ApiKey>)')
+    def _write(new_key: str) -> bool:
+        try:
+            fp = Path(path)
+            text = fp.read_text()
+            updated = _pat.sub(rf'\g<1>{new_key}\g<2>', text)
+            if updated == text:
+                return False  # tag not found — nothing to update
+            fp.write_text(updated)
+            return True
+        except Exception:
+            return False
+    return _write
+
+
 def _xml_tag(path: str, tag: str) -> Callable[[], Optional[str]]:
     def _read() -> Optional[str]:
         try:
@@ -95,6 +114,23 @@ def _xml_tag(path: str, tag: str) -> Callable[[], Optional[str]]:
     return _read
 
 
+def _xml_tag_write(path: str, tag: str) -> Callable[[str], bool]:
+    """Replace a named XML tag value in-place using regex to preserve original formatting."""
+    _pat = re.compile(rf'(<{re.escape(tag)}>)[^<]*(</{re.escape(tag)}>)')
+    def _write(new_key: str) -> bool:
+        try:
+            fp = Path(path)
+            text = fp.read_text()
+            updated = _pat.sub(rf'\g<1>{new_key}\g<2>', text)
+            if updated == text:
+                return False
+            fp.write_text(updated)
+            return True
+        except Exception:
+            return False
+    return _write
+
+
 def _build_auto_fetch(cfg: Optional[dict]) -> Optional[Callable[[], Optional[str]]]:
     if not cfg:
         return None
@@ -104,6 +140,19 @@ def _build_auto_fetch(cfg: Optional[dict]) -> Optional[Callable[[], Optional[str
         return _arr_xml(path)
     if t == "xml_tag":
         return _xml_tag(path, cfg.get("tag", "ApiKey"))
+    return None
+
+
+def _build_auto_write(cfg: Optional[dict]) -> Optional[Callable[[str], bool]]:
+    """Return a writer for the same config source used by auto_fetch."""
+    if not cfg:
+        return None
+    t = cfg.get("type")
+    path = cfg.get("path", "")
+    if t == "arr_xml":
+        return _arr_xml_write(path)
+    if t == "xml_tag":
+        return _xml_tag_write(path, cfg.get("tag", "ApiKey"))
     return None
 
 
@@ -156,11 +205,13 @@ def load_rotate_keys_config(path: Path) -> tuple:
             continue
         db_refs_raw = raw.get("db_refs", [])
         db_refs = _resolve_db_refs(db_refs_raw, db_groups)
+        af_cfg = raw.get("auto_fetch")
         services[sid] = ServiceDef(
             display_name=raw.get("display_name", sid),
             env_var=raw.get("env_var", ""),
             settings_url=raw.get("settings_url", ""),
-            auto_fetch=_build_auto_fetch(raw.get("auto_fetch")),
+            auto_fetch=_build_auto_fetch(af_cfg),
+            auto_write=_build_auto_write(af_cfg),
             db_refs=db_refs,
             note=raw.get("note", ""),
             health_url=raw.get("health_url", ""),
