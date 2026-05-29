@@ -24,8 +24,14 @@ class Settings(BaseSettings):
     reset_key: str = Field(default="", alias="RESET_KEY")
     secret_key: str = Field(default="change-me-in-production", alias="SECRET_KEY")
 
-    # Bitwarden
+    # Bitwarden — all optional; if client_id + client_secret + master_password are set
+    # the app will authenticate automatically on startup and re-authenticate transparently
+    # when the session expires (no manual login ever needed).
     bw_session: str = Field(default="", alias="BW_SESSION")
+    bw_client_id: str = Field(default="", alias="BW_CLIENT_ID")
+    bw_client_secret: str = Field(default="", alias="BW_CLIENT_SECRET")
+    bw_master_password: str = Field(default="", alias="BW_MASTER_PASSWORD")
+    bw_server_url: str = Field(default="", alias="BW_SERVER_URL")  # for self-hosted Vaultwarden
 
     # Scanning
     scan_interval_minutes: int = Field(default=360, alias="SCAN_INTERVAL_MINUTES")
