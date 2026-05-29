@@ -31,17 +31,39 @@ def bw_status() -> dict:
     return {"status": "unauthenticated", "userEmail": ""}
 
 
-def bw_login(email: str, master_password: str) -> tuple[Optional[str], str]:
-    """Log in to Bitwarden and return (session_token, error_message)."""
+def bw_configure_server(server_url: str) -> tuple[bool, str]:
+    """Point the CLI at a self-hosted Vaultwarden/Bitwarden instance."""
+    try:
+        result = subprocess.run(
+            ["bw", "config", "server", server_url],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            return True, ""
+        return False, (result.stderr.strip() or result.stdout.strip())
+    except Exception as exc:
+        return False, str(exc)
+
+
+def bw_login(email: str, master_password: str, server_url: str = "") -> tuple[Optional[str], str]:
+    """Log in to Bitwarden and return (session_token, error_message).
+
+    If server_url is provided, runs `bw config server` first (for self-hosted Vaultwarden).
+    """
+    if server_url:
+        ok, cfg_err = bw_configure_server(server_url)
+        if not ok:
+            return None, f"Server config failed: {cfg_err}"
     try:
         result = subprocess.run(
             ["bw", "login", email, master_password, "--raw"],
             capture_output=True, text=True, timeout=60,
         )
-        if result.returncode == 0:
+        if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip(), ""
-        err = result.stderr.strip() or result.stdout.strip()
-        return None, err
+        # Combine stdout + stderr so the caller always gets something useful
+        err = " | ".join(filter(None, [result.stderr.strip(), result.stdout.strip()]))
+        return None, err or f"exit code {result.returncode}"
     except Exception as exc:
         return None, str(exc)
 

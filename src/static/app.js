@@ -420,6 +420,8 @@ function openBwModal() {
     unlockForm.style.display = 'none';
     document.getElementById('bw-email').value = '';
     document.getElementById('bw-login-password').value = '';
+    const su = document.getElementById('bw-server-url');
+    if (su) su.value = '';
   } else {
     document.getElementById('bw-modal-title').textContent = 'Unlock Bitwarden';
     loginForm.style.display = 'none';
@@ -437,11 +439,13 @@ async function submitBwLogin(event) {
   event.preventDefault();
   const email = document.getElementById('bw-email').value;
   const password = document.getElementById('bw-login-password').value;
+  const serverUrl = (document.getElementById('bw-server-url') || {}).value || '';
   const resultPre = document.getElementById('bw-modal-result');
-  resultPre.textContent = 'Logging in…';
+  resultPre.textContent = serverUrl ? 'Configuring server & logging in…' : 'Logging in…';
   const form = new FormData();
   form.append('email', email);
   form.append('master_password', password);
+  if (serverUrl) form.append('server_url', serverUrl);
   try {
     const res = await fetch('/api/bitwarden/login', { method: 'POST', body: form });
     const data = await res.json();

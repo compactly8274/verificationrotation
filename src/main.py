@@ -414,17 +414,39 @@ async def api_bw_status(request: Request):
 
 
 @app.post("/api/bitwarden/login")
-async def api_bw_login(request: Request, email: str = Form(...), master_password: str = Form(...)):
+async def api_bw_login(
+    request: Request,
+    email: str = Form(...),
+    master_password: str = Form(...),
+    server_url: str = Form(""),
+):
     """Log in to Bitwarden (needed on first run or after container restart)."""
     require_auth(request)
     global _bw_session
     if not bw_available():
         raise HTTPException(status_code=503, detail="Bitwarden CLI not installed")
-    session, err = bw_login(email, master_password)
+    session, err = bw_login(email, master_password, server_url=server_url)
     if not session:
         raise HTTPException(status_code=403, detail=f"Login failed: {err}")
     _bw_session = session
     return {"success": True, "message": f"Logged in and unlocked as {email}"}
+
+
+@app.get("/api/bitwarden/debug")
+async def api_bw_debug(request: Request):
+    """Return raw bw status output for troubleshooting."""
+    require_auth(request)
+    try:
+        import subprocess as _sp
+        result = _sp.run(["bw", "status"], capture_output=True, text=True, timeout=15)
+        return {
+            "returncode": result.returncode,
+            "stdout": result.stdout.strip(),
+            "stderr": result.stderr.strip(),
+            "parsed": bw_status(),
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
 @app.post("/api/bitwarden/unlock")

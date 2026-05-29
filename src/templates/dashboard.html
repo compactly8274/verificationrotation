@@ -74,6 +74,10 @@
         Master password
         <input type="password" id="bw-login-password" name="master_password" placeholder="Master password" required autocomplete="current-password">
       </label>
+      <label>
+        Server URL <small style="color:var(--pico-muted-color)">(optional — for self-hosted Vaultwarden)</small>
+        <input type="url" id="bw-server-url" name="server_url" placeholder="https://vault.example.com" autocomplete="off">
+      </label>
       <footer>
         <button type="submit" class="primary">Login &amp; Unlock</button>
       </footer>
