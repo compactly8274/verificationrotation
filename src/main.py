@@ -20,7 +20,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, update
 from starlette.middleware.sessions import SessionMiddleware
 
-from src.bitwarden import bw_available, bw_get_session, bw_unlock
+from src.bitwarden import bw_available, bw_get_session, bw_login, bw_status, bw_unlock
 from src.config import settings
 from src.database import async_session, init_db
 from src.env_manager import read_env
@@ -423,12 +423,51 @@ async def dashboard(request: Request):
 async def api_bw_status(request: Request):
     require_auth(request)
     available = bw_available()
+    cli_status = bw_status() if available else {"status": "unauthenticated", "userEmail": ""}
     session = get_bw_session()
     return {
         "available": available,
         "unlocked": bool(session),
+        "login_status": cli_status["status"],   # unauthenticated | locked | unlocked
+        "user_email": cli_status["userEmail"],
         "source": "memory" if _bw_session else ("env" if session else None),
     }
+
+
+@app.post("/api/bitwarden/login")
+async def api_bw_login(
+    request: Request,
+    email: str = Form(...),
+    master_password: str = Form(...),
+    server_url: str = Form(""),
+):
+    """Log in to Bitwarden (needed on first run or after container restart)."""
+    require_auth(request)
+    global _bw_session
+    if not bw_available():
+        raise HTTPException(status_code=503, detail="Bitwarden CLI not installed")
+    session, err = bw_login(email, master_password, server_url=server_url)
+    if not session:
+        raise HTTPException(status_code=403, detail=f"Login failed: {err}")
+    _bw_session = session
+    return {"success": True, "message": f"Logged in and unlocked as {email}"}
+
+
+@app.get("/api/bitwarden/debug")
+async def api_bw_debug(request: Request):
+    """Return raw bw status output for troubleshooting."""
+    require_auth(request)
+    try:
+        import subprocess as _sp
+        result = _sp.run(["bw", "status"], capture_output=True, text=True, timeout=15)
+        return {
+            "returncode": result.returncode,
+            "stdout": result.stdout.strip(),
+            "stderr": result.stderr.strip(),
+            "parsed": bw_status(),
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
 
 
 @app.post("/api/bitwarden/unlock")
@@ -437,9 +476,15 @@ async def api_bw_unlock(request: Request, master_password: str = Form(...)):
     global _bw_session
     if not bw_available():
         raise HTTPException(status_code=503, detail="Bitwarden CLI not installed")
-    session = bw_unlock(master_password)
+    cli_state = bw_status()
+    if cli_state["status"] == "unauthenticated":
+        raise HTTPException(
+            status_code=403,
+            detail="Not logged in — use Login (email + password) instead of Unlock",
+        )
+    session, err = bw_unlock(master_password)
     if not session:
-        raise HTTPException(status_code=403, detail="Unlock failed — check your master password")
+        raise HTTPException(status_code=403, detail=f"Unlock failed: {err}")
     _bw_session = session
     return {"success": True, "message": "Bitwarden unlocked"}
 
