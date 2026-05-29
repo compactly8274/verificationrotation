@@ -484,10 +484,24 @@ def rotate(
 
     local_new_key: Optional[str] = new_key
     if not local_new_key and svc.auto_fetch:
-        local_new_key = svc.auto_fetch()
-        if local_new_key and local_new_key != old_key:
+        fetched = svc.auto_fetch()
+        if fetched and fetched != old_key:
+            local_new_key = fetched
             logger.info("Auto-read new key from config file for %s", svc.env_var)
             print(f"  ✓ Auto-read new key from config file ({svc.env_var})")
+        elif svc.auto_write and non_interactive:
+            # Config file still has the old key — generate a new one and write it now.
+            # *arr apps use 32-char lowercase hex keys; secrets.token_hex(16) matches that format.
+            generated = secrets.token_hex(16)
+            if svc.auto_write(generated):
+                local_new_key = generated
+                logger.info("Generated and wrote new API key for %s", svc.env_var)
+                print(f"  ✓ Generated and wrote new API key to config file ({svc.env_var})")
+            else:
+                print(f"  ✗ auto_write failed — could not update config file for {svc.env_var}")
+                log_audit(env_path, service_id, _key_hash(old_key), "", 0, 0, False, "auto_write to config file failed")
+                send_notification("rotation_failed", svc.display_name, "auto_write to config file failed", service_id=service_id)
+                return False
         else:
             local_new_key = None
             print("  Could not auto-read (key unchanged or file missing)")
