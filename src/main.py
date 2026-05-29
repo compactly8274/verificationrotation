@@ -8,6 +8,8 @@ import io
 import json
 import logging
 import os
+import queue
+import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -16,7 +18,7 @@ from typing import Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI, Form, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, update
@@ -57,6 +59,29 @@ _auto_rotate_lock = asyncio.Lock()
 
 _SCAN_TIMEOUT = timedelta(minutes=settings.scan_timeout_minutes)
 _ROTATION_LOCK_TIMEOUT = timedelta(minutes=10)
+
+
+class _QueuedWriter(io.TextIOBase):
+    """Thread-safe stdout replacement that pushes each line into a queue for SSE streaming."""
+
+    def __init__(self, q: queue.Queue):
+        self.q = q
+        self._buf = ""
+
+    def write(self, s):
+        self._buf += s
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            self.q.put(line)
+        return len(s)
+
+    def flush(self):
+        if self._buf:
+            self.q.put(self._buf)
+            self._buf = ""
+
+    def close(self):
+        self.flush()
 
 
 def _scan_is_running() -> bool:
@@ -228,6 +253,7 @@ async def _background_scan():
     async with _scan_lock:
         scan_heartbeat = datetime.now()
         started = datetime.now()
+        logger.info("Background scan started")
         log = ScanLog(started_at=started, status="running")
         async with async_session() as session:
             session.add(log)
@@ -277,6 +303,7 @@ async def _background_scan():
 
             error_msg = "; ".join(errors) if errors else None
             status = "completed_with_errors" if errors else "completed"
+            logger.info("Background scan %s (%d keys, %d errors)", status, len(index.local_files), len(errors))
             async with async_session() as session:
                 await session.execute(
                     update(ScanLog).where(ScanLog.id == log_id).values(
@@ -645,6 +672,7 @@ async def api_rotate(
     if not dry_run:
         rotation_in_progress = {"service_id": service_id, "started_at": datetime.now()}
 
+    logger.info("Rotating %s (dry_run=%s)", service_id, dry_run)
     rotation_log = {}
     _buf = io.StringIO()
     try:
@@ -664,6 +692,7 @@ async def api_rotate(
         if not dry_run:
             rotation_in_progress = None
     rotation_output = _buf.getvalue()
+    logger.info("Rotation %s %s", service_id, "succeeded" if ok else "failed")
 
     async with async_session() as session:
         if not dry_run:
@@ -692,6 +721,119 @@ async def api_rotate(
         await session.commit()
 
     return {"success": ok, "dry_run": dry_run, "log": rotation_output}
+
+
+@app.get("/api/rotate/{service_id}/stream")
+async def api_rotate_stream(
+    request: Request,
+    service_id: str,
+    new_value: Optional[str] = None,
+    dry_run: bool = False,
+    generate_password: bool = False,
+    sync_bitwarden_flag: bool = False,
+):
+    """Stream rotation output in real-time via Server-Sent Events."""
+    require_auth(request)
+    global scan_index, rotation_in_progress
+
+    if not dry_run and (_rotation_is_running() or _rotation_lock.locked()):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Rotation already in progress for '{rotation_in_progress['service_id']}'. Try again shortly.",
+        )
+
+    _, _, _, _, services = load_rotate_keys_config(settings.descriptions_path)
+    if service_id not in services:
+        raise HTTPException(status_code=404, detail="Service not found")
+    svc = services[service_id]
+
+    env = read_env(settings.env_file)
+    db_hosts = await _get_db_hosts()
+    if not scan_index:
+        scan_index = build_scan_index(services, env, env_path=settings.env_file, remote_hosts=db_hosts)
+
+    bw_session = get_bw_session() if sync_bitwarden_flag and bw_available() else None
+
+    async with async_session() as session:
+        svc_row = await session.get(Service, service_id)
+        known_hits = svc_row.hit_count if svc_row else -1
+
+    if not dry_run:
+        rotation_in_progress = {"service_id": service_id, "started_at": datetime.now()}
+
+    logger.info("Streaming rotation for %s (dry_run=%s)", service_id, dry_run)
+    q: queue.Queue = queue.Queue()
+    ok_result = [False]
+
+    def run_rotation():
+        qw = _QueuedWriter(q)
+        with contextlib.redirect_stdout(qw):
+            try:
+                ok_result[0] = rotate(
+                    service_id, svc, env, settings.env_file, scan_index,
+                    rotation_log={},
+                    dry_run=dry_run,
+                    non_interactive=True,
+                    generate_passwords=generate_password,
+                    bw_session=bw_session,
+                    new_key=new_value,
+                    remote_hosts=db_hosts,
+                    known_hits=known_hits,
+                )
+            except Exception as exc:
+                q.put(f"✗ Error during rotation: {exc}")
+                ok_result[0] = False
+            finally:
+                qw.close()
+
+    t = threading.Thread(target=run_rotation, daemon=True)
+    t.start()
+
+    async def generate():
+        while t.is_alive() or not q.empty():
+            try:
+                line = q.get(timeout=0.2)
+                yield f"event: log\ndata: {json.dumps({'text': line})}\n\n"
+            except queue.Empty:
+                continue
+        t.join()
+
+        ok = ok_result[0]
+        logger.info("Streamed rotation %s %s", service_id, "succeeded" if ok else "failed")
+
+        if not dry_run:
+            rotation_in_progress = None
+            try:
+                async with async_session() as session:
+                    if ok:
+                        new_hash = hashlib.sha256((new_value or env.get(svc.env_var, "")).encode()).hexdigest()[:16]
+                        await session.execute(
+                            update(Service).where(Service.id == service_id).values(
+                                last_rotated=datetime.now(), current_hash=new_hash, status="ok"
+                            )
+                        )
+                        session.add(RotationHistory(
+                            service_id=service_id,
+                            old_hash="",
+                            new_hash=new_hash,
+                            success=1,
+                            message="Rotated via web UI (streamed)",
+                        ))
+                    else:
+                        session.add(RotationHistory(
+                            service_id=service_id,
+                            old_hash="",
+                            new_hash="",
+                            success=0,
+                            message="Rotation failed via web UI (streamed)",
+                        ))
+                    await session.commit()
+            except Exception as exc:
+                logger.exception("Failed to save rotation result for %s: %s", service_id, exc)
+
+        yield f"event: done\ndata: {json.dumps({'success': ok, 'dry_run': dry_run})}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 @app.post("/api/rotate-all")
@@ -724,11 +866,12 @@ async def api_rotate_all(
         hit_count_map = {row.id: row.hit_count for row in all_svc_rows}
 
     results = []
-    for sid, svc in services.items():
-        if not svc.env_var or not env.get(svc.env_var):
-            continue
+    eligible = [(sid, svc) for sid, svc in services.items() if svc.env_var and env.get(svc.env_var)]
+    logger.info("Rotate-all starting for %d service(s) (dry_run=%s)", len(eligible), dry_run)
+    for sid, svc in eligible:
         if not dry_run:
             rotation_in_progress = {"service_id": sid, "started_at": datetime.now()}
+        logger.info("Rotate-all: rotating %s", sid)
         try:
             ok = rotate(
                 sid, svc, env, settings.env_file, scan_index,
@@ -743,6 +886,7 @@ async def api_rotate_all(
         finally:
             if not dry_run:
                 rotation_in_progress = None
+        logger.info("Rotate-all: %s %s", sid, "ok" if ok else "failed")
         results.append({"service": sid, "success": ok})
         if ok and not dry_run:
             async with async_session() as session:

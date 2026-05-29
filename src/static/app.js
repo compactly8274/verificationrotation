@@ -117,25 +117,31 @@ async function submitRotate(event) {
   const genPw = document.getElementById('modal-gen-pw').checked;
   const syncBw = document.getElementById('modal-sync-bw').checked;
   const resultPre = document.getElementById('modal-result');
-  resultPre.textContent = 'Working...';
+  resultPre.textContent = '';
 
-  const form = new FormData();
-  if (newValue) form.append('new_value', newValue);
-  form.append('dry_run', dryRun ? 'true' : 'false');
-  form.append('generate_password', genPw ? 'true' : 'false');
-  form.append('sync_bitwarden_flag', syncBw ? 'true' : 'false');
+  const params = new URLSearchParams({
+    dry_run: dryRun,
+    generate_password: genPw,
+    sync_bitwarden_flag: syncBw,
+  });
+  if (newValue) params.set('new_value', newValue);
 
-  try {
-    const res = await fetch(`/api/rotate/${serviceId}`, { method: 'POST', body: form });
-    const data = await res.json();
-    const status = data.success ? '✓ Success' : '✗ Failed';
-    resultPre.textContent = `${status}\n\n${data.log || ''}`.trim();
-    if (data.success && !dryRun) {
-      setTimeout(loadServices, 500);
-    }
-  } catch (e) {
-    resultPre.textContent = 'Error: ' + e.message;
-  }
+  const evtSource = new EventSource(`/api/rotate/${encodeURIComponent(serviceId)}/stream?${params}`);
+  evtSource.addEventListener('log', (e) => {
+    resultPre.textContent += JSON.parse(e.data).text + '\n';
+    resultPre.scrollTop = resultPre.scrollHeight;
+  });
+  evtSource.addEventListener('done', (e) => {
+    const { success, dry_run } = JSON.parse(e.data);
+    const prefix = success ? '✓ Success' : '✗ Failed';
+    resultPre.textContent = prefix + '\n' + resultPre.textContent;
+    evtSource.close();
+    if (success && !dry_run) setTimeout(loadServices, 500);
+  });
+  evtSource.onerror = () => {
+    if (resultPre.textContent === '') resultPre.textContent = 'Error: connection lost';
+    evtSource.close();
+  };
 }
 
 async function rotateAll() {
