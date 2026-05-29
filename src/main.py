@@ -440,13 +440,15 @@ async def api_bw_login(
     email: str = Form(...),
     master_password: str = Form(...),
     server_url: str = Form(""),
+    mfa_code: str = Form(""),
+    mfa_method: int = Form(0),
 ):
     """Log in to Bitwarden (needed on first run or after container restart)."""
     require_auth(request)
     global _bw_session
     if not bw_available():
         raise HTTPException(status_code=503, detail="Bitwarden CLI not installed")
-    session, err = bw_login(email, master_password, server_url=server_url)
+    session, err = bw_login(email, master_password, server_url=server_url, mfa_code=mfa_code, mfa_method=mfa_method)
     if not session:
         raise HTTPException(status_code=403, detail=f"Login failed: {err}")
     _bw_session = session

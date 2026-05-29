@@ -45,10 +45,17 @@ def bw_configure_server(server_url: str) -> tuple[bool, str]:
         return False, str(exc)
 
 
-def bw_login(email: str, master_password: str, server_url: str = "") -> tuple[Optional[str], str]:
+def bw_login(
+    email: str,
+    master_password: str,
+    server_url: str = "",
+    mfa_code: str = "",
+    mfa_method: int = 0,
+) -> tuple[Optional[str], str]:
     """Log in to Bitwarden and return (session_token, error_message).
 
     If server_url is provided, runs `bw config server` first (for self-hosted Vaultwarden).
+    If mfa_code is provided, passes --method and --code (default method 0 = TOTP authenticator).
     Password is passed via stdin to avoid exposing it in /proc/cmdline.
     """
     if server_url:
@@ -56,11 +63,10 @@ def bw_login(email: str, master_password: str, server_url: str = "") -> tuple[Op
         if not ok:
             return None, f"Server config failed: {cfg_err}"
     try:
-        result = subprocess.run(
-            ["bw", "login", email, "--raw"],
-            input=master_password,
-            capture_output=True, text=True, timeout=60,
-        )
+        cmd = ["bw", "login", email, "--raw"]
+        if mfa_code:
+            cmd += ["--method", str(mfa_method), "--code", mfa_code]
+        result = subprocess.run(cmd, input=master_password, capture_output=True, text=True, timeout=60)
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip(), ""
         # Combine stdout + stderr so the caller always gets something useful
