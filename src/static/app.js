@@ -18,7 +18,7 @@ function renderServices(services) {
     container.innerHTML = '<p>No services configured.</p>';
     return;
   }
-  let html = '<div class="grid">';
+  let html = '<div id="services-grid">';
   for (const svc of services) {
     const ageText = svc.age_days !== null ? `${svc.age_days}d ago` : 'never';
     const isStale = svc.status === 'stale';
