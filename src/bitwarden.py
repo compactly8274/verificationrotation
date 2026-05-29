@@ -31,9 +31,14 @@ def bw_get_session() -> Optional[str]:
 
 
 def bw_unlock(master_password: str) -> Optional[str]:
+    """Unlock the vault and return the session key.
+
+    Password is passed via stdin to avoid exposing it in /proc/cmdline.
+    """
     try:
         result = subprocess.run(
-            ["bw", "unlock", master_password, "--raw"],
+            ["bw", "unlock", "--raw"],
+            input=master_password,
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode == 0:

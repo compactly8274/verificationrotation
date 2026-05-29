@@ -461,7 +461,8 @@ def rotate(
             return True
         if generate_passwords and is_password_service(svc):
             new_key = generate_password()
-            print(f"  ✓ Auto-generated password: {new_key[:6]}...{new_key[-4:]}")
+            logger.info("Auto-generated password for %s", svc.env_var)
+            print("  ✓ Auto-generated password (check .env for the value)")
         else:
             new_key = input("  Paste new key/password (or blank to skip): ").strip()
         if not new_key or new_key == old_key:
@@ -485,8 +486,8 @@ def rotate(
     if not local_new_key and svc.auto_fetch:
         local_new_key = svc.auto_fetch()
         if local_new_key and local_new_key != old_key:
-            masked = local_new_key[:6] + "..." + local_new_key[-4:]
-            print(f"  ✓ Auto-read new key from config file: {masked}")
+            logger.info("Auto-read new key from config file for %s", svc.env_var)
+            print(f"  ✓ Auto-read new key from config file ({svc.env_var})")
         else:
             local_new_key = None
             print("  Could not auto-read (key unchanged or file missing)")
@@ -494,8 +495,9 @@ def rotate(
     if not local_new_key:
         if generate_passwords and is_password_service(svc):
             local_new_key = generate_password()
-            print(f"  ✓ Auto-generated password: {local_new_key[:6]}...{local_new_key[-4:]}")
-            print(f"  → Copy this password into the service if you haven't already.")
+            logger.info("Auto-generated password for %s", svc.env_var)
+            print("  ✓ Auto-generated password (check .env for the value)")
+            print("  → Copy this password into the service if you haven't already.")
         elif not non_interactive:
             local_new_key = input("  Paste new key/password: ").strip()
 
