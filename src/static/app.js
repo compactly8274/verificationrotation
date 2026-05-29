@@ -418,6 +418,24 @@ async function loadBwStatus() {
   }
 }
 
+function setBwLoginTab(tab) {
+  const pwForm = document.getElementById('bw-pw-form');
+  const apiForm = document.getElementById('bw-apikey-form');
+  const pwTab = document.getElementById('bw-tab-pw');
+  const akTab = document.getElementById('bw-tab-apikey');
+  if (tab === 'apikey') {
+    pwForm.style.display = 'none';
+    apiForm.style.display = 'block';
+    pwTab.className = 'secondary outline';
+    akTab.className = 'secondary';
+  } else {
+    pwForm.style.display = 'block';
+    apiForm.style.display = 'none';
+    pwTab.className = 'secondary';
+    akTab.className = 'secondary outline';
+  }
+}
+
 function openBwModal() {
   document.getElementById('bw-modal-result').textContent = '';
   const loginForm = document.getElementById('bw-login-form');
@@ -426,12 +444,11 @@ function openBwModal() {
     document.getElementById('bw-modal-title').textContent = 'Login to Bitwarden';
     loginForm.style.display = 'block';
     unlockForm.style.display = 'none';
+    setBwLoginTab('pw');
     document.getElementById('bw-email').value = '';
     document.getElementById('bw-login-password').value = '';
-    const su = document.getElementById('bw-server-url');
-    if (su) su.value = '';
-    const mc = document.getElementById('bw-mfa-code');
-    if (mc) mc.value = '';
+    const fields = ['bw-server-url', 'bw-mfa-code', 'bw-client-id', 'bw-client-secret', 'bw-apikey-master-password', 'bw-apikey-server-url'];
+    fields.forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
   } else {
     document.getElementById('bw-modal-title').textContent = 'Unlock Bitwarden';
     loginForm.style.display = 'none';
@@ -466,6 +483,33 @@ async function submitBwLogin(event) {
       setTimeout(() => { closeBwModal(); loadBwStatus(); }, 900);
     } else {
       resultPre.textContent = 'Error: ' + (data.detail || 'Login failed');
+    }
+  } catch (e) {
+    resultPre.textContent = 'Error: ' + e.message;
+  }
+}
+
+async function submitBwApiKeyLogin(event) {
+  event.preventDefault();
+  const clientId = document.getElementById('bw-client-id').value;
+  const clientSecret = document.getElementById('bw-client-secret').value;
+  const masterPassword = document.getElementById('bw-apikey-master-password').value;
+  const serverUrl = document.getElementById('bw-apikey-server-url').value || '';
+  const resultPre = document.getElementById('bw-modal-result');
+  resultPre.textContent = 'Authenticating via API key…';
+  const form = new FormData();
+  form.append('client_id', clientId);
+  form.append('client_secret', clientSecret);
+  form.append('master_password', masterPassword);
+  if (serverUrl) form.append('server_url', serverUrl);
+  try {
+    const res = await fetch('/api/bitwarden/login-apikey', { method: 'POST', body: form });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      resultPre.textContent = data.message;
+      setTimeout(() => { closeBwModal(); loadBwStatus(); }, 900);
+    } else {
+      resultPre.textContent = 'Error: ' + (data.detail || 'API key login failed');
     }
   } catch (e) {
     resultPre.textContent = 'Error: ' + e.message;

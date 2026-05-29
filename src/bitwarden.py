@@ -45,6 +45,43 @@ def bw_configure_server(server_url: str) -> tuple[bool, str]:
         return False, str(exc)
 
 
+def bw_login_apikey(
+    client_id: str,
+    client_secret: str,
+    master_password: str,
+    server_url: str = "",
+) -> tuple[Optional[str], str]:
+    """Authenticate via Bitwarden personal API key (no MFA required), then unlock vault.
+
+    Returns (session_token, error_message).  The API key is the client_id +
+    client_secret pair found under Account Settings > Security > Keys in Bitwarden /
+    Vaultwarden.  After successful API-key login the vault is still locked, so
+    master_password is used to unlock and return a usable session token.
+    """
+    if server_url:
+        ok, cfg_err = bw_configure_server(server_url)
+        if not ok:
+            return None, f"Server config failed: {cfg_err}"
+    try:
+        env = os.environ.copy()
+        env["BW_CLIENTID"] = client_id
+        env["BW_CLIENTSECRET"] = client_secret
+        login_result = subprocess.run(
+            ["bw", "login", "--apikey"],
+            env=env,
+            capture_output=True, text=True, timeout=30,
+        )
+        # Exit code 1 with "already logged in" is acceptable — proceed to unlock
+        already_logged_in = "already logged in" in (login_result.stdout + login_result.stderr).lower()
+        if login_result.returncode != 0 and not already_logged_in:
+            err = " | ".join(filter(None, [login_result.stderr.strip(), login_result.stdout.strip()]))
+            return None, err or f"API key login failed (exit {login_result.returncode})"
+    except Exception as exc:
+        return None, str(exc)
+    # Vault is now authenticated but locked — unlock with master password
+    return bw_unlock(master_password)
+
+
 def bw_login(
     email: str,
     master_password: str,
