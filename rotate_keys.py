@@ -170,10 +170,14 @@ def bw_get_session() -> Optional[str]:
 
 
 def bw_unlock(master_password: str) -> Optional[str]:
-    """Unlock the vault and return the session key."""
+    """Unlock the vault and return the session key.
+
+    Password is passed via stdin to avoid exposing it in /proc/cmdline.
+    """
     try:
         result = subprocess.run(
-            ["bw", "unlock", master_password, "--raw"],
+            ["bw", "unlock", "--raw"],
+            input=master_password,
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode == 0:
@@ -1277,7 +1281,7 @@ def rotate(
             return True
         if generate_passwords and is_password_service(svc):
             new_key = generate_password()
-            print(f"  ✓ Auto-generated password: {new_key[:6]}...{new_key[-4:]}")
+            print("  ✓ Auto-generated password (check .env for the value)")
         else:
             new_key = input("  Paste new key/password (or blank to skip): ").strip()
         if not new_key or new_key == old_key:
@@ -1302,8 +1306,7 @@ def rotate(
     if svc.auto_fetch:
         new_key = svc.auto_fetch()
         if new_key and new_key != old_key:
-            masked = new_key[:6] + "..." + new_key[-4:]
-            print(f"  ✓ Auto-read new key from config file: {masked}")
+            print(f"  ✓ Auto-read new key from config file ({svc.env_var})")
         else:
             new_key = None
             print("  Could not auto-read (key unchanged or file missing)")
@@ -1311,8 +1314,8 @@ def rotate(
     if not new_key:
         if generate_passwords and is_password_service(svc):
             new_key = generate_password()
-            print(f"  ✓ Auto-generated password: {new_key[:6]}...{new_key[-4:]}")
-            print(f"  → Copy this password into the service if you haven't already.")
+            print("  ✓ Auto-generated password (check .env for the value)")
+            print("  → Copy this password into the service if you haven't already.")
         elif not non_interactive:
             new_key = input("  Paste new key/password: ").strip()
 

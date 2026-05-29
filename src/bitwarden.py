@@ -49,6 +49,7 @@ def bw_login(email: str, master_password: str, server_url: str = "") -> tuple[Op
     """Log in to Bitwarden and return (session_token, error_message).
 
     If server_url is provided, runs `bw config server` first (for self-hosted Vaultwarden).
+    Password is passed via stdin to avoid exposing it in /proc/cmdline.
     """
     if server_url:
         ok, cfg_err = bw_configure_server(server_url)
@@ -56,7 +57,8 @@ def bw_login(email: str, master_password: str, server_url: str = "") -> tuple[Op
             return None, f"Server config failed: {cfg_err}"
     try:
         result = subprocess.run(
-            ["bw", "login", email, master_password, "--raw"],
+            ["bw", "login", email, "--raw"],
+            input=master_password,
             capture_output=True, text=True, timeout=60,
         )
         if result.returncode == 0 and result.stdout.strip():
@@ -83,10 +85,14 @@ def bw_get_session() -> Optional[str]:
 
 
 def bw_unlock(master_password: str) -> tuple[Optional[str], str]:
-    """Unlock vault and return (session_token, error_message)."""
+    """Unlock vault and return (session_token, error_message).
+
+    Password is passed via stdin to avoid exposing it in /proc/cmdline.
+    """
     try:
         result = subprocess.run(
-            ["bw", "unlock", master_password, "--raw"],
+            ["bw", "unlock", "--raw"],
+            input=master_password,
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode == 0:
@@ -215,7 +221,7 @@ def sync_bitwarden(svc: ServiceDef, new_value: str, session: str, env: dict[str,
         return False, "Bitwarden edit command failed"
     # Create new item
     username = ""
-    if svc.env_var.endswith("_PASSWORD"):
+    if env and svc.env_var.endswith("_PASSWORD"):
         user_var = svc.env_var.replace("_PASSWORD", "_USERNAME")
         if user_var in env:
             username = env[user_var]
