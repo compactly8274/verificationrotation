@@ -16,3 +16,4 @@ services:
       - /mnt/user/appdata:/mnt/user/appdata
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./data:/app/data
+      - ./.env:/app/.env:rw
