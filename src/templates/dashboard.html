@@ -126,6 +126,27 @@
   </article>
 </dialog>
 
+<!-- Service Edit Modal -->
+<dialog id="service-edit-modal">
+  <article>
+    <header>
+      <button aria-label="Close" rel="prev" onclick="closeServiceEditModal()"></button>
+      <h3 id="service-edit-title">Edit Service URL</h3>
+    </header>
+    <form id="service-edit-form" onsubmit="submitServiceEdit(event)">
+      <input type="hidden" id="service-edit-id">
+      <label>
+        Settings URL
+        <input type="url" id="service-edit-url" placeholder="http://host:port/settings" autocomplete="off">
+      </label>
+      <footer>
+        <button type="submit" class="primary">Save</button>
+      </footer>
+    </form>
+    <pre id="service-edit-result"></pre>
+  </article>
+</dialog>
+
 <!-- Rotate Modal -->
 <dialog id="rotate-modal">
   <article>

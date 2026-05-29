@@ -44,7 +44,7 @@ function renderServices(services) {
             <button class="secondary outline" onclick="openModal('${esc(svc.id)}', '${esc(svc.display_name)}')">Rotate</button>
           </div>
         </header>
-        ${svc.settings_url ? `<p><a href="${esc(svc.settings_url)}" target="_blank" rel="noopener noreferrer">Open settings</a></p>` : ''}
+        ${svc.settings_url ? `<p><a href="${esc(svc.settings_url)}" target="_blank" rel="noopener noreferrer">Open settings</a> <a href="#" onclick="openServiceEditModal('${esc(svc.id)}', '${esc(svc.settings_url)}'); return false;" style="font-size:.85em;opacity:.7">edit</a></p>` : `<p><a href="#" onclick="openServiceEditModal('${esc(svc.id)}', ''); return false;" style="font-size:.85em;opacity:.7">+ add settings URL</a></p>`}
       </article>
     `;
   }
@@ -552,6 +552,41 @@ async function lockBitwarden() {
     if (data.success) loadBwStatus();
   } catch (e) {
     alert('Error: ' + e.message);
+  }
+}
+
+// Service edit modal
+function openServiceEditModal(serviceId, settingsUrl) {
+  document.getElementById('service-edit-id').value = serviceId;
+  document.getElementById('service-edit-url').value = settingsUrl;
+  document.getElementById('service-edit-title').textContent = 'Edit Service URL';
+  document.getElementById('service-edit-result').textContent = '';
+  document.getElementById('service-edit-modal').showModal();
+}
+
+function closeServiceEditModal() {
+  document.getElementById('service-edit-modal').close();
+}
+
+async function submitServiceEdit(event) {
+  event.preventDefault();
+  const id = document.getElementById('service-edit-id').value;
+  const url = document.getElementById('service-edit-url').value;
+  const resultPre = document.getElementById('service-edit-result');
+  resultPre.textContent = 'Saving…';
+  const form = new FormData();
+  form.append('settings_url', url);
+  try {
+    const res = await fetch(`/api/services/${encodeURIComponent(id)}`, { method: 'PUT', body: form });
+    const data = await res.json();
+    if (data.success) {
+      resultPre.textContent = 'Saved!';
+      setTimeout(() => { closeServiceEditModal(); loadServices(); }, 500);
+    } else {
+      resultPre.textContent = 'Error: ' + (data.detail || 'unknown');
+    }
+  } catch (e) {
+    resultPre.textContent = 'Error: ' + e.message;
   }
 }
 
