@@ -22,7 +22,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, update
 from starlette.middleware.sessions import SessionMiddleware
 
-from src.bitwarden import bw_available, bw_get_session, bw_login, bw_status, bw_unlock
+from src.bitwarden import bw_available, bw_get_session, bw_login, bw_login_apikey, bw_status, bw_unlock
 from src.config import settings
 from src.database import async_session, init_db
 from src.env_manager import read_env
@@ -455,6 +455,26 @@ async def api_bw_login(
         raise HTTPException(status_code=403, detail=f"Login failed: {err}")
     _bw_session = session
     return {"success": True, "message": f"Logged in and unlocked as {email}"}
+
+
+@app.post("/api/bitwarden/login-apikey")
+async def api_bw_login_apikey(
+    request: Request,
+    client_id: str = Form(...),
+    client_secret: str = Form(...),
+    master_password: str = Form(...),
+    server_url: str = Form(""),
+):
+    """Authenticate via Bitwarden personal API key (no MFA needed) then unlock vault."""
+    require_auth(request)
+    global _bw_session
+    if not bw_available():
+        raise HTTPException(status_code=503, detail="Bitwarden CLI not installed")
+    session, err = bw_login_apikey(client_id, client_secret, master_password, server_url=server_url)
+    if not session:
+        raise HTTPException(status_code=403, detail=f"API key login failed: {err}")
+    _bw_session = session
+    return {"success": True, "message": "Logged in via API key and unlocked vault"}
 
 
 @app.get("/api/bitwarden/debug")

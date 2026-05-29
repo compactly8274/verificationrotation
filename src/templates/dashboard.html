@@ -64,28 +64,51 @@
     </header>
 
     <!-- Login form (shown when not logged in) -->
-    <form id="bw-login-form" onsubmit="submitBwLogin(event)" style="display:none">
-      <p style="color:var(--pico-muted-color);font-size:.9rem">Not logged in. Enter your Bitwarden email and master password.</p>
-      <label>
-        Email
-        <input type="email" id="bw-email" name="email" placeholder="you@example.com" required autocomplete="username">
-      </label>
-      <label>
-        Master password
-        <input type="password" id="bw-login-password" name="master_password" placeholder="Master password" required autocomplete="current-password">
-      </label>
-      <label>
-        Server URL <small style="color:var(--pico-muted-color)">(optional — for self-hosted Vaultwarden)</small>
-        <input type="url" id="bw-server-url" name="server_url" placeholder="https://vault.example.com" autocomplete="off">
-      </label>
-      <label>
-        MFA / Authenticator code <small style="color:var(--pico-muted-color)">(leave blank if no MFA)</small>
-        <input type="text" id="bw-mfa-code" name="mfa_code" placeholder="6-digit code" autocomplete="one-time-code" inputmode="numeric" maxlength="8">
-      </label>
-      <footer>
-        <button type="submit" class="primary">Login &amp; Unlock</button>
-      </footer>
-    </form>
+    <div id="bw-login-form" style="display:none">
+      <!-- Method toggle -->
+      <div style="display:flex;gap:.5rem;margin-bottom:1rem">
+        <button type="button" id="bw-tab-pw" class="secondary" onclick="setBwLoginTab('pw')" style="flex:1">Email / Password</button>
+        <button type="button" id="bw-tab-apikey" class="secondary outline" onclick="setBwLoginTab('apikey')" style="flex:1">API Key</button>
+      </div>
+
+      <form id="bw-pw-form" onsubmit="submitBwLogin(event)">
+        <p style="color:var(--pico-muted-color);font-size:.9rem">Not logged in. Enter your Bitwarden email and master password.</p>
+        <label>Email
+          <input type="email" id="bw-email" placeholder="you@example.com" required autocomplete="username">
+        </label>
+        <label>Master password
+          <input type="password" id="bw-login-password" placeholder="Master password" required autocomplete="current-password">
+        </label>
+        <label>Server URL <small style="color:var(--pico-muted-color)">(optional — Vaultwarden)</small>
+          <input type="url" id="bw-server-url" placeholder="https://vault.example.com" autocomplete="off">
+        </label>
+        <label>MFA code <small style="color:var(--pico-muted-color)">(leave blank if none)</small>
+          <input type="text" id="bw-mfa-code" placeholder="6-digit code" autocomplete="one-time-code" inputmode="numeric" maxlength="8">
+        </label>
+        <footer>
+          <button type="submit" class="primary">Login &amp; Unlock</button>
+        </footer>
+      </form>
+
+      <form id="bw-apikey-form" onsubmit="submitBwApiKeyLogin(event)" style="display:none">
+        <p style="color:var(--pico-muted-color);font-size:.9rem">Use your Bitwarden personal API key (Account Settings → Security → Keys). No MFA required.</p>
+        <label>Client ID
+          <input type="text" id="bw-client-id" placeholder="user.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" required autocomplete="off">
+        </label>
+        <label>Client Secret
+          <input type="password" id="bw-client-secret" placeholder="Client secret" required autocomplete="off">
+        </label>
+        <label>Master password <small style="color:var(--pico-muted-color)">(needed to decrypt vault)</small>
+          <input type="password" id="bw-apikey-master-password" placeholder="Master password" required autocomplete="current-password">
+        </label>
+        <label>Server URL <small style="color:var(--pico-muted-color)">(optional — Vaultwarden)</small>
+          <input type="url" id="bw-apikey-server-url" placeholder="https://vault.example.com" autocomplete="off">
+        </label>
+        <footer>
+          <button type="submit" class="primary">Login via API Key &amp; Unlock</button>
+        </footer>
+      </form>
+    </div>
 
     <!-- Unlock form (shown when logged in but locked) -->
     <form id="bw-unlock-form" onsubmit="submitBwUnlock(event)" style="display:none">
