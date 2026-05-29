@@ -61,6 +61,21 @@ class RemoteHost(Base):
     created_at = Column(DateTime, server_default=func.now())
 
 
+class DiscoveredKey(Base):
+    __tablename__ = "discovered_keys"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    service_id = Column(String(128), nullable=False)
+    env_var = Column(String(128), nullable=False)
+    display_name = Column(String(256))
+    value_encrypted = Column(Text, nullable=False)  # Fernet-encrypted with SECRET_KEY
+    source_file = Column(String(512))
+    confidence = Column(String(16), default="medium")
+    strategy = Column(String(32))
+    discovered_at = Column(DateTime, server_default=func.now())
+    applied_at = Column(DateTime, nullable=True)
+
+
 class SSHKey(Base):
     __tablename__ = "ssh_keys"
 
