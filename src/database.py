@@ -23,6 +23,8 @@ _MIGRATIONS = [
     ("services", "settings_url", "VARCHAR"),
     ("services", "docker_name", "VARCHAR"),
     ("services", "health_url", "VARCHAR"),
+    ("services", "detected_config_path", "VARCHAR(512)"),
+    ("services", "detected_config_format", "VARCHAR(32)"),
 ]
 
 
