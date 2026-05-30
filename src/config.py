@@ -49,7 +49,10 @@ class Settings(BaseSettings):
     docker_socket: Path = Field(default=Path("/var/run/docker.sock"), alias="DOCKER_SOCKET")
 
     # Key Discovery
-    discovery_search_dirs: str = Field(default="/", alias="DISCOVERY_SEARCH_DIRS")
+    discovery_search_dirs: str = Field(
+        default="/mnt/user/appdata,/boot/config,/opt,/home",
+        alias="DISCOVERY_SEARCH_DIRS",
+    )
     discovery_skip_dirs: str = Field(
         default="proc,sys,dev,run,tmp,boot,snap,lost+found",
         alias="DISCOVERY_SKIP_DIRS",
