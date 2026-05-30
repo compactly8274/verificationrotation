@@ -1,12 +1,37 @@
 services:
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy
+    container_name: docker-proxy
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1
+      POST: 1
+      NETWORKS: 0
+      VOLUMES: 0
+      IMAGES: 0
+      EXEC: 0
+      ALLOW_RESTARTS: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - internal
+
   verificationrotation:
     image: ghcr.io/compactly8274/verificationrotation:latest
     container_name: verificationrotation
     restart: unless-stopped
     ports:
       - "8000:8000"
+    environment:
+      - DOCKER_HOST=tcp://docker-proxy:2375
     volumes:
       - /mnt/user/appdata:/mnt/user/appdata
-      - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./data:/app/data
       - ./.env:/app/.env:rw
+    depends_on:
+      - docker-proxy
+    networks:
+      - internal
+
+networks:
+  internal:

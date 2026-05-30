@@ -141,7 +141,18 @@ async def _apply_detections(services: dict) -> dict:
 def verify_password(password: str) -> bool:
     if not settings.admin_password:
         return False
-    return hmac.compare_digest(password, settings.admin_password)
+    stored = settings.admin_password
+    # Support bcrypt-hashed passwords ($2b$ prefix)
+    if stored.startswith("$2b$") or stored.startswith("$2a$"):
+        import bcrypt as _bcrypt
+        try:
+            return _bcrypt.checkpw(password.encode(), stored.encode())
+        except Exception:
+            return False
+    # Plaintext fallback for backward compatibility
+    if not stored.startswith("change-me"):
+        logger.warning("ADMIN_PASSWORD is stored in plaintext — consider hashing with bcrypt")
+    return hmac.compare_digest(password, stored)
 
 
 def verify_reset_key(key: str) -> bool:
@@ -1448,6 +1459,11 @@ async def api_clear_discovered_keys(request: Request):
 
 @app.post("/api/reset-password")
 async def api_reset_password(request: Request, reset_key: str = Form(...), new_password: str = Form(...)):
+    require_auth(request)
     if not verify_reset_key(reset_key):
         raise HTTPException(status_code=403, detail="Invalid reset key")
-    return {"success": True, "message": "Password reset acknowledged. Update ADMIN_PASSWORD in your .env and restart the container."}
+    # Hash the new password with bcrypt and write it to .env
+    import bcrypt as _bcrypt
+    hashed = _bcrypt.hashpw(new_password.encode(), _bcrypt.gensalt()).decode()
+    write_env(settings.env_file, {"ADMIN_PASSWORD": hashed})
+    return {"success": True, "message": "Password updated. Please restart the container for the change to take effect."}
