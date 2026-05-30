@@ -1261,18 +1261,178 @@ async def api_list_discovered_keys(request: Request):
 
 @app.post("/api/discovered-keys/{key_id}/apply")
 async def api_apply_discovered_key(request: Request, key_id: int):
-    """Write a discovered key's plaintext value into the .env file."""
+    """Apply a discovered key by running a full rotation to propagate it everywhere."""
     require_auth(request)
+    global scan_index, rotation_in_progress
+
     async with async_session() as session:
         row = await session.get(DiscoveredKey, key_id)
         if not row:
             raise HTTPException(status_code=404, detail="Discovered key not found")
-        plaintext = decrypt_value(row.value_encrypted)
-        write_env(settings.env_file, {row.env_var: plaintext})
-        row.applied_at = datetime.now()
+
+    plaintext = decrypt_value(row.value_encrypted)
+    service_id = row.service_id
+
+    _, _, _, _, services = load_rotate_keys_config(settings.descriptions_path)
+    if service_id not in services:
+        raise HTTPException(status_code=404, detail=f"Service {service_id} no longer configured")
+
+    svc = services[service_id]
+    env = read_env(settings.env_file)
+    db_hosts = await _get_db_hosts()
+    if not scan_index:
+        scan_index = build_scan_index(services, env, env_path=settings.env_file, remote_hosts=db_hosts)
+
+    async with async_session() as session:
+        svc_row = await session.get(Service, service_id)
+        known_hits = svc_row.hit_count if svc_row else -1
+
+    if _rotation_is_running() or _rotation_lock.locked():
+        raise HTTPException(status_code=409, detail="Rotation already in progress. Try again shortly.")
+
+    rotation_in_progress = {"service_id": service_id, "started_at": datetime.now()}
+    logger.info("Applying discovered key for %s (%s)", service_id, row.env_var)
+
+    _buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(_buf):
+            ok = rotate(
+                service_id, svc, env, settings.env_file, scan_index,
+                rotation_log={},
+                dry_run=False,
+                non_interactive=True,
+                generate_passwords=False,
+                bw_session=get_bw_session() if bw_available() else None,
+                new_key=plaintext,
+                remote_hosts=db_hosts,
+                known_hits=known_hits,
+            )
+    finally:
+        rotation_in_progress = None
+    rotation_output = _buf.getvalue()
+    logger.info("Apply discovered key for %s %s", service_id, "succeeded" if ok else "failed")
+
+    async with async_session() as session:
+        row = await session.get(DiscoveredKey, key_id)
+        if ok:
+            new_hash = hashlib.sha256(plaintext.encode()).hexdigest()[:16]
+            await session.execute(
+                update(Service).where(Service.id == service_id).values(
+                    last_rotated=datetime.now(), current_hash=new_hash, status="ok"
+                )
+            )
+            session.add(RotationHistory(
+                service_id=service_id,
+                old_hash="",
+                new_hash=new_hash,
+                success=1,
+                message="Applied discovered key",
+            ))
+            row.applied_at = datetime.now()
+        else:
+            session.add(RotationHistory(
+                service_id=service_id,
+                old_hash="",
+                new_hash="",
+                success=0,
+                message="Discovered key apply failed",
+            ))
         await session.commit()
-    logger.info("Applied discovered key for %s (%s) to %s", row.env_var, row.service_id, settings.env_file)
-    return {"success": True, "env_var": row.env_var}
+
+    return {"success": ok, "env_var": row.env_var, "log": rotation_output}
+
+
+@app.post("/api/discovered-keys/apply-all")
+async def api_apply_all_discovered_keys(request: Request):
+    """Apply all high-confidence discovered keys that haven't been applied yet."""
+    require_auth(request)
+    global scan_index, rotation_in_progress
+
+    _, _, _, _, services = load_rotate_keys_config(settings.descriptions_path)
+    env = read_env(settings.env_file)
+    db_hosts = await _get_db_hosts()
+    if not scan_index:
+        scan_index = build_scan_index(services, env, env_path=settings.env_file, remote_hosts=db_hosts)
+
+    from sqlalchemy import and_
+    async with async_session() as session:
+        rows = (await session.execute(
+            select(DiscoveredKey).where(
+                and_(
+                    DiscoveredKey.confidence == "high",
+                    DiscoveredKey.applied_at.is_(None)
+                )
+            )
+        )).scalars().all()
+
+    if not rows:
+        return {"results": [], "total": 0, "applied_count": 0}
+
+    results = []
+    for row in rows:
+        sid = row.service_id
+        if sid not in services:
+            results.append({"id": row.id, "service_id": sid, "success": False, "message": "Service no longer configured"})
+            continue
+
+        if _rotation_is_running() or _rotation_lock.locked():
+            results.append({"id": row.id, "service_id": sid, "success": False, "message": "Rotation already in progress"})
+            break
+
+        svc = services[sid]
+        plaintext = decrypt_value(row.value_encrypted)
+
+        async with async_session() as session:
+            svc_row = await session.get(Service, sid)
+            known_hits = svc_row.hit_count if svc_row else -1
+
+        rotation_in_progress = {"service_id": sid, "started_at": datetime.now()}
+        logger.info("Bulk-apply: applying discovered key for %s", sid)
+        try:
+            ok = rotate(
+                sid, svc, env, settings.env_file, scan_index,
+                rotation_log={},
+                dry_run=False,
+                non_interactive=True,
+                generate_passwords=False,
+                bw_session=get_bw_session() if bw_available() else None,
+                new_key=plaintext,
+                remote_hosts=db_hosts,
+                known_hits=known_hits,
+            )
+        except Exception as exc:
+            ok = False
+            logger.exception("Bulk-apply error for %s: %s", sid, exc)
+        finally:
+            rotation_in_progress = None
+
+        logger.info("Bulk-apply: %s %s", sid, "ok" if ok else "failed")
+
+        async with async_session() as session:
+            db_row = await session.get(DiscoveredKey, row.id)
+            if ok:
+                new_hash = hashlib.sha256(plaintext.encode()).hexdigest()[:16]
+                await session.execute(
+                    update(Service).where(Service.id == sid).values(
+                        last_rotated=datetime.now(), current_hash=new_hash, status="ok"
+                    )
+                )
+                session.add(RotationHistory(
+                    service_id=sid, old_hash="", new_hash=new_hash, success=1,
+                    message="Applied discovered key (bulk)",
+                ))
+                db_row.applied_at = datetime.now()
+            else:
+                session.add(RotationHistory(
+                    service_id=sid, old_hash="", new_hash="", success=0,
+                    message="Discovered key apply failed (bulk)",
+                ))
+            await session.commit()
+
+        results.append({"id": row.id, "service_id": sid, "success": ok})
+
+    applied_count = sum(1 for r in results if r["success"])
+    return {"results": results, "total": len(results), "applied_count": applied_count}
 
 
 @app.delete("/api/discovered-keys")
