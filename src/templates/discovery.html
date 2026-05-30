@@ -96,7 +96,14 @@ async function runDetection() {
   banner.style.display = 'none';
   try {
     const res = await csrfFetch('/api/detect-service-paths', { method: 'POST' });
-    const data = await res.json();
+    let data;
+    try {
+      data = await res.json();
+    } catch (_) {
+      const text = await res.text().catch(() => '(no body)');
+      showBanner(banner, false, `Server error (HTTP ${res.status}): ${text.slice(0, 300)}`);
+      return;
+    }
     if (res.ok) {
       showBanner(banner, true, `Detection complete — found config files for ${data.detected} service(s).`);
       await loadDetectedPaths();
