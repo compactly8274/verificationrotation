@@ -10,10 +10,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Bitwarden CLI
-RUN curl -L -o /tmp/bw.zip "https://github.com/bitwarden/clients/releases/download/cli-v2025.5.0/bw-linux-2025.5.0.zip" \
+# Install Bitwarden CLI with version verification
+ENV BW_VERSION=2025.5.0
+RUN curl -L -o /tmp/bw.zip "https://github.com/bitwarden/clients/releases/download/cli-v${BW_VERSION}/bw-linux-${BW_VERSION}.zip" \
     && unzip -o /tmp/bw.zip -d /usr/local/bin/ \
     && chmod +x /usr/local/bin/bw \
+    && bw --version | grep -q "${BW_VERSION}" || { echo 'Bitwarden CLI version mismatch'; exit 1; } \
     && rm /tmp/bw.zip
 
 # Install Python dependencies

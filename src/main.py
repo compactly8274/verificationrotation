@@ -559,7 +559,7 @@ async def _auto_rotate_stale():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "last_scan": last_scan_time.isoformat() if last_scan_time else None}
+    return {"status": "ok"}
 
 
 @app.get("/login", response_class=HTMLResponse)
