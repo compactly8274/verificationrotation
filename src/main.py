@@ -24,6 +24,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, update
 from starlette.middleware.sessions import SessionMiddleware
 
+from src.app_signatures import APP_SIGNATURES
 from src.bitwarden import bw_available, bw_get_session, bw_login, bw_login_apikey, bw_status, bw_unlock
 from src.config import settings
 from src.crypto import decrypt_value, encrypt_value, mask_value
@@ -32,9 +33,15 @@ from src.env_manager import read_env, write_env
 from src.key_discovery import discover_keys
 from src.models import DiscoveredKey, RemoteHost, RotationHistory, ScanLog, Service, SSHKey
 from src.notifications import send_notification
+from src.path_discovery import detect_service_paths
 from src.rotator import generate_password, is_password_service, rotate
 from src.scanner import ScanIndex, build_scan_index
-from src.services_registry import ServiceDef, load_rotate_keys_config
+from src.services_registry import (
+    ServiceDef,
+    build_detected_fetcher,
+    build_detected_writer,
+    load_rotate_keys_config,
+)
 from src.ssh_keys import delete_ssh_key, generate_ssh_key
 
 logger = logging.getLogger("verificationrotation")
@@ -99,6 +106,35 @@ def _rotation_is_running() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Service augmentation — merge DB-detected config paths into ServiceDef objects
+# ---------------------------------------------------------------------------
+
+async def _apply_detections(services: dict) -> dict:
+    """Augment services that lack auto_fetch/auto_write with DB-detected config paths."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(Service).where(Service.detected_config_path.isnot(None))
+        )
+        rows = result.scalars().all()
+
+    for row in rows:
+        if row.id not in services:
+            continue
+        svc = services[row.id]
+        if svc.auto_fetch:
+            continue  # YAML-defined config takes precedence
+        sig = APP_SIGNATURES.get(row.id)
+        if not sig or not row.detected_config_path:
+            continue
+        svc.auto_fetch = build_detected_fetcher(sig, row.detected_config_path)
+        svc.auto_write = build_detected_writer(sig, row.detected_config_path)
+        if sig.get("docker_name") and not svc.docker_name:
+            svc.docker_name = sig["docker_name"]
+
+    return services
+
+
+# ---------------------------------------------------------------------------
 # Auth helpers
 # ---------------------------------------------------------------------------
 
@@ -156,12 +192,10 @@ def get_bw_session() -> Optional[str]:
 async def lifespan(app: FastAPI):
     await init_db()
     await _seed_services()
-    # Warm up Bitwarden session from pre-configured credentials (runs in thread pool
-    # so the slow bw CLI calls don't block the event loop at startup)
+    # Warm up Bitwarden session in a background thread — do NOT await so uvicorn
+    # starts accepting requests immediately rather than waiting for bw CLI calls.
     if settings.bw_client_id and settings.bw_client_secret and settings.bw_master_password:
-        import asyncio
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, get_bw_session)
+        asyncio.get_event_loop().run_in_executor(None, get_bw_session)
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         _background_scan, "interval",
@@ -178,7 +212,7 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     scheduler.add_job(
         _background_scan, "date",
-        run_date=datetime.now() + timedelta(seconds=10),
+        run_date=datetime.now() + timedelta(seconds=5),
         id="initial_scan",
     )
     yield
@@ -268,12 +302,17 @@ async def _background_scan():
 
             scan_heartbeat = datetime.now()
 
-            index = build_scan_index(
-                services, env,
-                env_path=settings.env_file,
-                skip_remote=False,
-                cache_max_age=settings.cache_max_age_hours,
-                remote_hosts=db_hosts,
+            # Run the synchronous scan in a thread pool so the event loop (and
+            # therefore the web UI) stays responsive throughout the scan.
+            index = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: build_scan_index(
+                    services, env,
+                    env_path=settings.env_file,
+                    skip_remote=False,
+                    cache_max_age=settings.cache_max_age_hours,
+                    remote_hosts=db_hosts,
+                ),
             )
             scan_index = index
             last_scan_time = datetime.now()
@@ -346,6 +385,7 @@ async def _auto_rotate_stale():
         auto_rotation_running = True
         try:
             _, _, _, _, services = load_rotate_keys_config(settings.descriptions_path)
+            services = await _apply_detections(services)
             env = read_env(settings.env_file)
             db_hosts = await _get_db_hosts()
 
@@ -369,7 +409,10 @@ async def _auto_rotate_stale():
 
             global scan_index
             if not scan_index:
-                scan_index = build_scan_index(services, env, env_path=settings.env_file, remote_hosts=db_hosts)
+                scan_index = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: build_scan_index(services, env, env_path=settings.env_file, remote_hosts=db_hosts),
+                )
 
             # Fetch hit counts for all stale services in one query
             async with async_session() as session:
@@ -653,6 +696,7 @@ async def api_rotate(
         )
 
     _, _, _, _, services = load_rotate_keys_config(settings.descriptions_path)
+    services = await _apply_detections(services)
     if service_id not in services:
         raise HTTPException(status_code=404, detail="Service not found")
     svc = services[service_id]
@@ -853,6 +897,7 @@ async def api_rotate_all(
         )
 
     _, _, _, _, services = load_rotate_keys_config(settings.descriptions_path)
+    services = await _apply_detections(services)
     env = read_env(settings.env_file)
     db_hosts = await _get_db_hosts()
     if not scan_index:
@@ -1051,6 +1096,78 @@ async def api_ssh_keys_delete(request: Request, key_id: int):
             raise HTTPException(status_code=404, detail="Key not found")
         delete_ssh_key(row.name)
         await session.delete(row)
+        await session.commit()
+    return {"success": True}
+
+
+# ---------------------------------------------------------------------------
+# API — Service Path Detection
+# ---------------------------------------------------------------------------
+
+@app.post("/api/detect-service-paths")
+async def api_detect_service_paths(request: Request):
+    """Scan DISCOVERY_SEARCH_DIRS for known service config files and persist paths."""
+    require_auth(request)
+    search_dirs = [
+        d.strip()
+        for d in settings.discovery_search_dirs.replace(":", ",").split(",")
+        if d.strip()
+    ]
+    loop = asyncio.get_event_loop()
+    detected = await loop.run_in_executor(None, lambda: detect_service_paths(search_dirs))
+
+    results = []
+    async with async_session() as session:
+        for sid, config_path in detected.items():
+            sig = APP_SIGNATURES.get(sid, {})
+            await session.execute(
+                update(Service).where(Service.id == sid).values(
+                    detected_config_path=config_path,
+                    detected_config_format=sig.get("format"),
+                )
+            )
+            results.append({"service_id": sid, "config_path": config_path, "format": sig.get("format")})
+        await session.commit()
+
+    # Attach display names
+    async with async_session() as session:
+        name_map = {r.id: r.display_name for r in (await session.execute(select(Service))).scalars().all()}
+    for r in results:
+        r["display_name"] = name_map.get(r["service_id"], r["service_id"])
+
+    return {"detected": len(results), "results": results}
+
+
+@app.get("/api/detected-service-paths")
+async def api_get_detected_service_paths(request: Request):
+    """Return all services that have a persisted detected config path."""
+    require_auth(request)
+    async with async_session() as session:
+        rows = (
+            await session.execute(select(Service).where(Service.detected_config_path.isnot(None)))
+        ).scalars().all()
+        return [
+            {
+                "service_id": r.id,
+                "display_name": r.display_name,
+                "config_path": r.detected_config_path,
+                "format": r.detected_config_format,
+            }
+            for r in rows
+        ]
+
+
+@app.delete("/api/detected-service-paths/{service_id}")
+async def api_clear_detected_service_path(request: Request, service_id: str):
+    """Remove the detected config path for a single service."""
+    require_auth(request)
+    async with async_session() as session:
+        await session.execute(
+            update(Service).where(Service.id == service_id).values(
+                detected_config_path=None,
+                detected_config_format=None,
+            )
+        )
         await session.commit()
     return {"success": True}
 

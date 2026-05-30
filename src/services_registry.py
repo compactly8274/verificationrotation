@@ -166,6 +166,65 @@ def _resolve_db_refs(raw_refs: list, groups: dict[str, list]) -> list:
     return out
 
 
+def build_detected_fetcher(sig: dict, config_path: str):
+    """Return an auto_fetch callable for a dynamically-detected service config."""
+    if sig.get("password_hash"):
+        # Hash is irreversible — always return None so auto_write generates a fresh value
+        return lambda: None
+
+    fmt = sig.get("format", "")
+    from src.config_io import read_env_file, read_ini, read_json, read_toml, read_yaml
+
+    def _fetch() -> Optional[str]:
+        if fmt == "ini":
+            return read_ini(config_path, sig["ini_section"], sig["ini_key"])
+        if fmt == "json":
+            return read_json(config_path, *sig["json_path"])
+        if fmt == "yaml":
+            return read_yaml(config_path, *sig["yaml_path"])
+        if fmt == "toml":
+            return read_toml(config_path, sig["toml_key"])
+        if fmt == "env":
+            return read_env_file(config_path, sig["env_key"])
+        return None
+
+    return _fetch
+
+
+def build_detected_writer(sig: dict, config_path: str):
+    """Return an auto_write callable for a dynamically-detected service config."""
+    fmt = sig.get("format", "")
+    password_hash = sig.get("password_hash")
+    from src.config_io import write_env_file, write_ini, write_json, write_toml, write_yaml
+
+    def _hash(value: str) -> str:
+        if password_hash == "bcrypt":
+            import bcrypt  # type: ignore[import]
+            return bcrypt.hashpw(value.encode(), bcrypt.gensalt()).decode()
+        if password_hash == "sha256_double":
+            import hashlib
+            return hashlib.sha256(
+                hashlib.sha256(value.encode()).hexdigest().encode()
+            ).hexdigest()
+        return value
+
+    def _write(new_value: str) -> bool:
+        stored = _hash(new_value)
+        if fmt == "ini":
+            return write_ini(config_path, sig["ini_section"], sig["ini_key"], stored)
+        if fmt == "json":
+            return write_json(config_path, stored, *sig["json_path"])
+        if fmt == "yaml":
+            return write_yaml(config_path, stored, *sig["yaml_path"])
+        if fmt == "toml":
+            return write_toml(config_path, sig["toml_key"], stored)
+        if fmt == "env":
+            return write_env_file(config_path, sig["env_key"], stored)
+        return False
+
+    return _write
+
+
 def load_rotate_keys_config(path: Path) -> tuple:
     """Return (SEARCH_DIRS, SEARCH_EXTS, SKIP_DIRS, REMOTE_HOSTS, SERVICES)."""
     if yaml is None or not path.exists():

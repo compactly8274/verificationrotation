@@ -13,18 +13,51 @@
   </ul>
 </nav>
 
-<div class="grid">
-  <div>
-    <h2>Key Discovery</h2>
-    <p>Scan config files, .env files, docker-compose files, and structured data (JSON/YAML/TOML/INI) to find API keys that differ from your current <code>.env</code>.</p>
-  </div>
+<!-- ── Section 1: Service Path Detection ──────────────────────────────────── -->
+<h2>Service Path Detection</h2>
+<p style="color:var(--pico-muted-color)">
+  Automatically find services' config files by scanning your appdata directory.
+  Once detected, those services can be rotated fully automatically — no manual
+  config editing required.
+</p>
+
+<article>
+  <header><h4>Detect Config File Paths</h4></header>
+  <p style="font-size:.9rem;color:var(--pico-muted-color)">
+    Scans <strong>DISCOVERY_SEARCH_DIRS</strong> for directories matching known
+    service names (e.g. <code>sabnzbd*</code>, <code>jackett*</code>,
+    <code>tautulli*</code> …) and locates their config files automatically.
+    Supports: SABnzbd, Jackett, Autobrr, Tautulli, Overseerr, Bazarr,
+    Jellyseerr, AdGuard Home, Pi-hole.
+  </p>
+  <footer>
+    <button id="btn-detect" class="primary" onclick="runDetection()">Detect Now</button>
+    <button class="secondary outline" onclick="loadDetectedPaths()">Refresh</button>
+  </footer>
+</article>
+
+<div id="detect-progress" style="display:none">
+  <article aria-busy="true">Scanning for service directories…</article>
 </div>
+<div id="detect-banner" style="display:none;margin-bottom:1rem"></div>
+<div id="detected-paths-container"><article aria-busy="true"></article></div>
+
+<hr style="margin:2rem 0">
+
+<!-- ── Section 2: Key Value Discovery ──────────────────────────────────────── -->
+<h2>Key Value Discovery</h2>
+<p style="color:var(--pico-muted-color)">
+  Scan config files, .env files, docker-compose files, and structured data
+  (JSON/YAML/TOML/INI) to find API key <em>values</em> that differ from your
+  current <code>.env</code>.  Discovered values are stored encrypted and only
+  visible (masked) to authenticated users.
+</p>
 
 <article>
   <header><h4>Run Discovery Scan</h4></header>
   <label>
     Search directories
-    <small style="color:var(--pico-muted-color)"> — comma or colon-separated paths to scan (leave blank for configured default)</small>
+    <small style="color:var(--pico-muted-color)"> — comma/colon-separated (blank = configured default)</small>
     <input type="text" id="scan-dirs" placeholder="/config,/data,/home">
   </label>
   <footer>
@@ -37,14 +70,84 @@
 <div id="scan-progress" style="display:none">
   <article aria-busy="true">Scanning filesystem for API keys… this may take a minute.</article>
 </div>
-
 <div id="scan-result-banner" style="display:none;margin-bottom:1rem"></div>
-
-<div id="discovered-container">
-  <article aria-busy="true"></article>
-</div>
+<div id="discovered-container"><article aria-busy="true"></article></div>
 
 <script>
+// ── helpers ──────────────────────────────────────────────────────────────────
+function escHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function showBanner(el, ok, msg) {
+  el.style.cssText = 'display:block;padding:.75rem 1rem;border-radius:var(--pico-border-radius);margin-bottom:1rem;color:#fff;background:'
+    + (ok ? 'var(--pico-ins-color,#27ae60)' : 'var(--pico-del-color,#c0392b)');
+  el.textContent = msg;
+}
+
+// ── Service Path Detection ────────────────────────────────────────────────────
+async function runDetection() {
+  const btn = document.getElementById('btn-detect');
+  const banner = document.getElementById('detect-banner');
+  const progress = document.getElementById('detect-progress');
+  btn.disabled = true;
+  btn.setAttribute('aria-busy', 'true');
+  progress.style.display = '';
+  banner.style.display = 'none';
+  try {
+    const res = await fetch('/api/detect-service-paths', { method: 'POST' });
+    const data = await res.json();
+    if (res.ok) {
+      showBanner(banner, true, `Detection complete — found config files for ${data.detected} service(s).`);
+      await loadDetectedPaths();
+    } else {
+      showBanner(banner, false, data.detail || 'Detection failed.');
+    }
+  } catch (err) {
+    showBanner(banner, false, 'Network error: ' + err);
+  } finally {
+    btn.disabled = false;
+    btn.removeAttribute('aria-busy');
+    progress.style.display = 'none';
+  }
+}
+
+async function loadDetectedPaths() {
+  const container = document.getElementById('detected-paths-container');
+  try {
+    const res = await fetch('/api/detected-service-paths');
+    const paths = await res.json();
+    if (!paths.length) {
+      container.innerHTML = '<p style="color:var(--pico-muted-color)">No detected service paths yet. Click <strong>Detect Now</strong> to scan.</p>';
+      return;
+    }
+    let html = `<div style="overflow-x:auto"><table>
+      <thead><tr><th>Service</th><th>Config File</th><th>Format</th><th>Status</th><th></th></tr></thead><tbody>`;
+    for (const p of paths) {
+      const fmt = p.format ? `<code>${escHtml(p.format)}</code>` : '—';
+      const short = p.config_path.length > 60 ? '…' + p.config_path.slice(-60) : p.config_path;
+      html += `<tr>
+        <td>${escHtml(p.display_name)}</td>
+        <td title="${escHtml(p.config_path)}" style="font-size:.8rem;color:var(--pico-muted-color)">${escHtml(short)}</td>
+        <td>${fmt}</td>
+        <td><span style="color:var(--pico-ins-color,#27ae60)">&#10003; Auto-rotation enabled</span></td>
+        <td><button class="secondary outline" style="padding:.2rem .6rem;font-size:.8rem"
+              onclick="clearDetectedPath('${escHtml(p.service_id)}')">Clear</button></td>
+      </tr>`;
+    }
+    html += '</tbody></table></div>';
+    container.innerHTML = html;
+  } catch (err) {
+    container.innerHTML = '<p style="color:var(--pico-del-color,#c0392b)">Failed to load detected paths: ' + err + '</p>';
+  }
+}
+
+async function clearDetectedPath(serviceId) {
+  if (!confirm(`Remove detected config path for ${serviceId}?`)) return;
+  const res = await fetch(`/api/detected-service-paths/${encodeURIComponent(serviceId)}`, { method: 'DELETE' });
+  if (res.ok) await loadDetectedPaths();
+}
+
+// ── Key Value Discovery ───────────────────────────────────────────────────────
 async function runDiscoveryScan() {
   const btn = document.getElementById('btn-scan');
   const progress = document.getElementById('scan-progress');
@@ -62,16 +165,13 @@ async function runDiscoveryScan() {
     const res = await fetch('/api/discover-keys', { method: 'POST', body });
     const data = await res.json();
     if (res.ok) {
-      banner.style.cssText = 'display:block;padding:.75rem 1rem;border-radius:var(--pico-border-radius);background:var(--pico-ins-color,#27ae60);color:#fff;margin-bottom:1rem';
-      banner.textContent = `Scan complete — found ${data.found} new key(s).`;
+      showBanner(banner, true, `Scan complete — found ${data.found} new key(s).`);
       await loadDiscoveredKeys();
     } else {
-      banner.style.cssText = 'display:block;padding:.75rem 1rem;border-radius:var(--pico-border-radius);background:var(--pico-del-color,#c0392b);color:#fff;margin-bottom:1rem';
-      banner.textContent = data.detail || 'Scan failed.';
+      showBanner(banner, false, data.detail || 'Scan failed.');
     }
   } catch (err) {
-    banner.style.cssText = 'display:block;padding:.75rem 1rem;border-radius:var(--pico-border-radius);background:var(--pico-del-color,#c0392b);color:#fff;margin-bottom:1rem';
-    banner.textContent = 'Network error: ' + err;
+    showBanner(banner, false, 'Network error: ' + err);
   } finally {
     btn.disabled = false;
     btn.removeAttribute('aria-busy');
@@ -91,20 +191,14 @@ async function loadDiscoveredKeys() {
     }
     let html = `<div style="overflow-x:auto"><table>
       <thead><tr>
-        <th>Service</th>
-        <th>Env Var</th>
-        <th>Discovered Value</th>
-        <th>Source</th>
-        <th>Confidence</th>
-        <th>Strategy</th>
-        <th>Applied</th>
-        <th></th>
+        <th>Service</th><th>Env Var</th><th>Discovered Value</th>
+        <th>Source</th><th>Confidence</th><th>Strategy</th><th>Applied</th><th></th>
       </tr></thead><tbody>`;
     for (const k of keys) {
       const applied = k.applied_at
         ? `<span style="color:var(--pico-ins-color,#27ae60)">&#10003; ${new Date(k.applied_at).toLocaleString()}</span>`
         : '<span style="color:var(--pico-muted-color)">—</span>';
-      const confidence = k.confidence === 'high'
+      const conf = k.confidence === 'high'
         ? `<span style="color:var(--pico-ins-color,#27ae60)">${k.confidence}</span>`
         : `<span style="color:var(--pico-muted-color)">${k.confidence}</span>`;
       const applyBtn = k.applied_at
@@ -116,8 +210,8 @@ async function loadDiscoveredKeys() {
         <td><code>${escHtml(k.env_var)}</code></td>
         <td><code>${escHtml(k.value_masked)}</code></td>
         <td title="${escHtml(k.source_file)}" style="font-size:.8rem;color:var(--pico-muted-color)">${escHtml(src)}</td>
-        <td>${confidence}</td>
-        <td><span style="font-size:.8rem">${escHtml(k.strategy)}</span></td>
+        <td>${conf}</td>
+        <td style="font-size:.8rem">${escHtml(k.strategy)}</td>
         <td style="font-size:.8rem">${applied}</td>
         <td>${applyBtn}</td>
       </tr>`;
@@ -142,16 +236,11 @@ async function applyKey(id) {
 
 async function clearDiscoveredKeys() {
   if (!confirm('Remove all discovered keys from the cache?')) return;
-  const res = await fetch('/api/discovered-keys', { method: 'DELETE' });
-  if (res.ok) {
-    await loadDiscoveredKeys();
-  }
+  await fetch('/api/discovered-keys', { method: 'DELETE' });
+  await loadDiscoveredKeys();
 }
 
-function escHtml(s) {
-  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-}
-
+loadDetectedPaths();
 loadDiscoveredKeys();
 </script>
 {% endblock %}
