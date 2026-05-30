@@ -15,6 +15,11 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     networks:
       - internal
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: "0.5"
 
   verificationrotation:
     image: ghcr.io/compactly8274/verificationrotation:latest
@@ -32,6 +37,14 @@ services:
       - docker-proxy
     networks:
       - internal
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+        reservations:
+          memory: 128M
+          cpus: "0.25"
 
 networks:
   internal:
