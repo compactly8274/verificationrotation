@@ -24,8 +24,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src/ ./src/
 COPY rotate_keys.yaml .
 
-# Ensure data directory exists
-RUN mkdir -p /app/data
+# Create non-root user and ensure data directory is writable
+RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuser \
+    && mkdir -p /app/data \
+    && chown -R appuser:appuser /app/data /app/src /app/rotate_keys.yaml
+
+USER appuser
 
 EXPOSE 8000
 

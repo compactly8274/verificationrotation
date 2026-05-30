@@ -200,7 +200,7 @@ def scan_dbs_for_keys(key_db_refs: dict[str, list]) -> dict[str, list[str]]:
 # Remote scanning (SSH)
 # ---------------------------------------------------------------------------
 
-def _ssh(host: str, user: str, cmd: str, timeout: int = 60, key_path: Optional[Path] = None) -> tuple[int, str, str]:
+def _ssh(host: str, user: str, cmd: str, timeout: int = 60, key_path: Optional[Path] = None, stdin_data: Optional[str] = None) -> tuple[int, str, str]:
     ssh_args = [
         "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
         "-o", "StrictHostKeyChecking=accept-new",
@@ -208,7 +208,8 @@ def _ssh(host: str, user: str, cmd: str, timeout: int = 60, key_path: Optional[P
     if key_path:
         ssh_args += ["-i", str(key_path)]
     ssh_args += [f"{user}@{host}", cmd]
-    result = subprocess.run(ssh_args, capture_output=True, text=True, timeout=timeout)
+    result = subprocess.run(ssh_args, capture_output=True, text=True, timeout=timeout,
+                            input=stdin_data)
     return result.returncode, result.stdout.strip(), result.stderr.strip()
 
 
@@ -216,20 +217,23 @@ def scan_remote_files_for_keys(host: str, user: str, search_dirs: list, search_e
     active = [k for k in keys if k]
     if not active:
         return {}
-    py = f"""
-import os, pathlib, json, re
-EXTS = {set(search_exts)!r}
-SKIP = {skip_dirs!r}
-KEYS = {active!r}
-PATS = {{k: re.compile(r'(?<![A-Za-z0-9_\\-./])' + re.escape(k) + r'(?![A-Za-z0-9_\\-./])') for k in KEYS}}
-index = {{k: [] for k in KEYS}}
-seen = {{k: set() for k in KEYS}}
+    # Script reads KEYS from stdin to avoid exposing them in /proc/cmdline
+    py = """
+import os, sys, pathlib, json, re
+data = json.load(sys.stdin)
+sys.stdin.close()
+EXTS = set(data["exts"])
+SKIP = set(data["skip"])
+KEYS = data["keys"]
+PATS = {k: re.compile(r'(?<![A-Za-z0-9_\\-./])' + re.escape(k) + r'(?![A-Za-z0-9_\\-./])') for k in KEYS}
+index = {k: [] for k in KEYS}
+seen = {k: set() for k in KEYS}
 SKIP_SUFFIXES = (".bak", ".tmp", ".backup", ".old", ".orig", ".swp", "~")
 SKIP_PREFIXES = ("readme", "changelog", "license", "copying", ".#")
 def _skip_name(n):
     lo = n.lower()
     return lo.endswith(SKIP_SUFFIXES) or lo.startswith(SKIP_PREFIXES)
-for base in {search_dirs!r}:
+for base in data["dirs"]:
     for root, dirs, files in os.walk(base):
         dirs[:] = [d for d in dirs if d not in SKIP]
         for fn in files:
@@ -252,7 +256,9 @@ for base in {search_dirs!r}:
                         index[k].append(s)
 print(json.dumps(index))
 """
-    rc, out, err = _ssh(host, user, f"python3 -c {__import__('shlex').quote(py)}", timeout=180, key_path=key_path)
+    stdin_data = json.dumps({"keys": active, "exts": list(search_exts), "skip": list(skip_dirs), "dirs": list(search_dirs)})
+    rc, out, err = _ssh(host, user, f"python3 -c {__import__('shlex').quote(py)}",
+                        timeout=180, key_path=key_path, stdin_data=stdin_data)
     if rc != 0:
         error_msg = err or "ssh error"
         print(f"  WARNING: remote file scan on {host} failed: {error_msg}")
@@ -271,33 +277,38 @@ def scan_remote_dbs_for_keys(host: str, user: str, db_refs: list, keys: set[str]
     active = [k for k in keys if k]
     if not active or not db_refs:
         return {k: [] for k in active}
-    py = f"""
-import sqlite3, pathlib, json, re
-DB_REFS = {db_refs!r}
-KEYS = {active!r}
-PATS = {{k: re.compile(r'(?<![A-Za-z0-9_\\-./])' + re.escape(k) + r'(?![A-Za-z0-9_\\-./])') for k in KEYS}}
-result = {{k: [] for k in KEYS}}
+    # Script reads KEYS and DB_REFS from stdin to avoid exposing them in /proc/cmdline
+    py = """
+import sqlite3, sys, pathlib, json, re
+data = json.load(sys.stdin)
+sys.stdin.close()
+DB_REFS = data["db_refs"]
+KEYS = data["keys"]
+PATS = {k: re.compile(r'(?<![A-Za-z0-9_\\-./])' + re.escape(k) + r'(?![A-Za-z0-9_\\-./])') for k in KEYS}
+result = {k: [] for k in KEYS}
 for db_path, table, col in DB_REFS:
     dp = pathlib.Path(db_path)
     if not dp.exists():
         continue
     try:
-        con = sqlite3.connect(f"file:{{dp}}?mode=ro", uri=True)
-        rows = con.execute(f"SELECT {{col}} FROM {{table}}").fetchall()
+        con = sqlite3.connect(f"file:{dp}?mode=ro", uri=True)
+        rows = con.execute(f"SELECT {col} FROM {table}").fetchall()
         con.close()
         for (blob,) in rows:
             if not blob:
                 continue
             for k in KEYS:
                 if PATS[k].search(blob):
-                    hit = f"{{db_path}}  ({{table}}.{{col}})"
+                    hit = f"{db_path}  ({table}.{col})"
                     if hit not in result[k]:
                         result[k].append(hit)
     except Exception:
         pass
 print(json.dumps(result))
 """
-    rc, out, err = _ssh(host, user, f"python3 -c {__import__('shlex').quote(py)}", timeout=60, key_path=key_path)
+    stdin_data = json.dumps({"keys": active, "db_refs": [list(r) for r in db_refs]})
+    rc, out, err = _ssh(host, user, f"python3 -c {__import__('shlex').quote(py)}",
+                        timeout=60, key_path=key_path, stdin_data=stdin_data)
     if rc != 0:
         error_msg = err or "ssh error"
         print(f"  WARNING: remote DB scan on {host} failed: {error_msg}")

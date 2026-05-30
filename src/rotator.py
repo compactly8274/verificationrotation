@@ -196,12 +196,15 @@ def replace_in_dbs(old: str, new: str, db_refs: list) -> list[str]:
 def replace_in_remote_files(host: str, user: str, old: str, new: str, filepaths: list) -> list[str]:
     if not filepaths:
         return []
-    py = f"""
-import shutil, pathlib, re
-OLD = {old!r}
-NEW = {new!r}
+    # Pass secrets via stdin instead of embedding in command line
+    py = """
+import shutil, sys, pathlib, re, json
+data = json.load(sys.stdin)
+sys.stdin.close()
+OLD = data["old"]
+NEW = data["new"]
 PAT = re.compile(r'(?<![A-Za-z0-9_\\-./])' + re.escape(OLD) + r'(?![A-Za-z0-9_\\-./])')
-for fp_str in {filepaths!r}:
+for fp_str in data["files"]:
     fp = pathlib.Path(fp_str)
     try:
         text = fp.read_text(errors='ignore')
@@ -211,9 +214,10 @@ for fp_str in {filepaths!r}:
             shutil.move(str(tmp), str(fp))
             print(fp)
     except OSError as e:
-        print(f'WARNING: {{e}}')
+        print(f'WARNING: {e}')
 """
-    rc, out, err = _ssh(host, user, f"python3 -c {shlex.quote(py)}")
+    stdin_data = json.dumps({"old": old, "new": new, "files": filepaths})
+    rc, out, err = _ssh(host, user, f"python3 -c {shlex.quote(py)}", stdin_data=stdin_data)
     if rc != 0:
         print(f"  WARNING: remote file replace on {host} failed: {err or 'ssh error'}")
         return []
@@ -223,13 +227,16 @@ for fp_str in {filepaths!r}:
 def replace_in_remote_dbs(host: str, user: str, old: str, new: str, db_refs: list) -> list[str]:
     if not db_refs:
         return []
-    py = f"""
-import sqlite3, shutil, pathlib, re
-OLD = {old!r}
-NEW = {new!r}
+    # Pass secrets via stdin instead of embedding in command line
+    py = """
+import sqlite3, shutil, sys, pathlib, re, json
+data = json.load(sys.stdin)
+sys.stdin.close()
+OLD = data["old"]
+NEW = data["new"]
 PAT = re.compile(r'(?<![A-Za-z0-9_\\-./])' + re.escape(OLD) + r'(?![A-Za-z0-9_\\-./])')
 seen = set()
-for db_path, table, col in {db_refs!r}:
+for db_path, table, col in data["db_refs"]:
     key = (db_path, table, col)
     if key in seen: continue
     seen.add(key)
@@ -239,22 +246,23 @@ for db_path, table, col in {db_refs!r}:
         backup = dp.with_suffix('.db.bak')
         shutil.copy2(dp, backup)
         con = sqlite3.connect(dp)
-        rows = con.execute(f"SELECT rowid, {{col}} FROM {{table}}").fetchall()
+        rows = con.execute(f"SELECT rowid, {col} FROM {table}").fetchall()
         updated = 0
         for rowid, blob in rows:
             if blob and PAT.search(blob):
-                con.execute(f"UPDATE {{table}} SET {{col}}=? WHERE rowid=?", (PAT.sub(lambda _: NEW, blob), rowid))
+                con.execute(f"UPDATE {table} SET {col}=? WHERE rowid=?", (PAT.sub(lambda _: NEW, blob), rowid))
                 updated += 1
         if updated:
             con.commit()
-            print(f"{{db_path}}  ({{table}}.{{col}}, {{updated}} row(s))")
+            print(f"{db_path}  ({table}.{col}, {updated} row(s))")
         else:
             backup.unlink(missing_ok=True)
         con.close()
     except Exception as e:
-        print(f'WARNING: {{e}}')
+        print(f'WARNING: {e}')
 """
-    rc, out, err = _ssh(host, user, f"python3 -c {shlex.quote(py)}")
+    stdin_data = json.dumps({"old": old, "new": new, "db_refs": [list(r) for r in db_refs]})
+    rc, out, err = _ssh(host, user, f"python3 -c {shlex.quote(py)}", stdin_data=stdin_data)
     if rc != 0:
         print(f"  WARNING: remote DB replace on {host} failed: {err or 'ssh error'}")
         return []
