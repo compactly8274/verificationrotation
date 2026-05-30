@@ -8,11 +8,22 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# If .env exists but isn't readable (wrong permissions in Docker), skip it rather
+# than crashing before uvicorn starts. Config still loads from env vars normally.
+_env_file = Path(".env")
+_readable_env_file: Path | None = _env_file if (
+    _env_file.exists() and os.access(_env_file, os.R_OK)
+) else None
+
 
 class Settings(BaseSettings):
     """All configuration loaded from environment variables / .env file."""
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=_readable_env_file,
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     # Paths
     env_file: Path = Field(default=Path(".env"), alias="ENV_FILE")
@@ -65,10 +76,18 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
+logger = logging.getLogger("verificationrotation")
+
+if _readable_env_file is None and _env_file.exists():
+    logger.warning(
+        ".env file exists but is not readable (permission denied). "
+        "Configuration will be loaded from environment variables only. "
+        "Fix with: chmod 644 .env"
+    )
+
 # Warn and auto-generate if the secret key is still the default
 if settings.secret_key == "change-me-in-production":
     generated = secrets.token_urlsafe(32)
-    logger = logging.getLogger("verificationrotation")
     logger.warning(
         "SECRET_KEY is set to the default value. A random key has been generated for this session. "
         "Set SECRET_KEY in your .env file for persistent sessions."
