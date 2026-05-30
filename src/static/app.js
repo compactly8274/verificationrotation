@@ -5,6 +5,34 @@ function esc(s) {
   return d.innerHTML;
 }
 
+// CSRF token management — fetched once and cached for the session
+let _csrfToken = null;
+
+async function getCsrfToken() {
+  if (_csrfToken) return _csrfToken;
+  try {
+    const res = await fetch('/api/csrf-token');
+    if (res.ok) {
+      const data = await res.json();
+      _csrfToken = data.csrf_token;
+      return _csrfToken;
+    }
+  } catch (e) {
+    console.error('Failed to fetch CSRF token', e);
+  }
+  return null;
+}
+
+// Wrapper for mutating requests that adds CSRF header
+async function csrfFetch(url, options = {}) {
+  const token = await getCsrfToken();
+  if (token) {
+    options.headers = options.headers || {};
+    options.headers['X-CSRF-Token'] = token;
+  }
+  return fetch(url, options);
+}
+
 async function loadServices() {
   const container = document.getElementById('services-container');
   container.innerHTML = '<article aria-busy="true"></article>';
@@ -150,7 +178,7 @@ async function rotateAll() {
   btn.disabled = true;
   btn.textContent = 'Rotating...';
   try {
-    const res = await fetch('/api/rotate-all', {
+    const res = await csrfFetch('/api/rotate-all', {
       method: 'POST',
       body: new URLSearchParams({ dry_run: 'false', generate_password: 'true', sync_bitwarden_flag: 'true' })
     });
@@ -255,7 +283,7 @@ async function submitHost(event) {
   try {
     const url = id ? `/api/hosts/${id}` : '/api/hosts';
     const method = id ? 'PUT' : 'POST';
-    const res = await fetch(url, { method, body: form });
+    const res = await csrfFetch(url, { method, body: form });
     const data = await res.json();
     resultPre.textContent = JSON.stringify(data, null, 2);
     if (data.success) {
@@ -269,7 +297,7 @@ async function submitHost(event) {
 async function deleteHost(id) {
   if (!confirm('Delete this host?')) return;
   try {
-    const res = await fetch(`/api/hosts/${id}`, { method: 'DELETE' });
+    const res = await csrfFetch(`/api/hosts/${id}`, { method: 'DELETE' });
     const data = await res.json();
     if (data.success) loadHosts();
   } catch (e) {
@@ -352,7 +380,7 @@ async function submitSshKey(event) {
   form.append('name', name);
 
   try {
-    const res = await fetch('/api/ssh-keys', { method: 'POST', body: form });
+    const res = await csrfFetch('/api/ssh-keys', { method: 'POST', body: form });
     const data = await res.json();
     if (data.success) {
       resultPre.textContent = 'Key generated successfully.';
@@ -370,7 +398,7 @@ async function submitSshKey(event) {
 async function deleteSshKey(id) {
   if (!confirm('Delete this key?')) return;
   try {
-    const res = await fetch(`/api/ssh-keys/${id}`, { method: 'DELETE' });
+    const res = await csrfFetch(`/api/ssh-keys/${id}`, { method: 'DELETE' });
     const data = await res.json();
     if (data.success) loadSshKeys();
   } catch (e) {
@@ -489,7 +517,7 @@ async function submitBwLogin(event) {
   if (serverUrl) form.append('server_url', serverUrl);
   if (mfaCode) form.append('mfa_code', mfaCode);
   try {
-    const res = await fetch('/api/bitwarden/login', { method: 'POST', body: form });
+    const res = await csrfFetch('/api/bitwarden/login', { method: 'POST', body: form });
     const data = await res.json();
     if (res.ok && data.success) {
       resultPre.textContent = data.message;
@@ -516,7 +544,7 @@ async function submitBwApiKeyLogin(event) {
   form.append('master_password', masterPassword);
   if (serverUrl) form.append('server_url', serverUrl);
   try {
-    const res = await fetch('/api/bitwarden/login-apikey', { method: 'POST', body: form });
+    const res = await csrfFetch('/api/bitwarden/login-apikey', { method: 'POST', body: form });
     const data = await res.json();
     if (res.ok && data.success) {
       resultPre.textContent = data.message;
@@ -537,7 +565,7 @@ async function submitBwUnlock(event) {
   const form = new FormData();
   form.append('master_password', password);
   try {
-    const res = await fetch('/api/bitwarden/unlock', { method: 'POST', body: form });
+    const res = await csrfFetch('/api/bitwarden/unlock', { method: 'POST', body: form });
     const data = await res.json();
     if (res.ok && data.success) {
       resultPre.textContent = 'Unlocked successfully.';
@@ -553,7 +581,7 @@ async function submitBwUnlock(event) {
 async function lockBitwarden() {
   if (!confirm('Clear the in-memory Bitwarden session?')) return;
   try {
-    const res = await fetch('/api/bitwarden/lock', { method: 'POST' });
+    const res = await csrfFetch('/api/bitwarden/lock', { method: 'POST' });
     const data = await res.json();
     if (data.success) loadBwStatus();
   } catch (e) {
@@ -583,7 +611,7 @@ async function submitServiceEdit(event) {
   const form = new FormData();
   form.append('settings_url', url);
   try {
-    const res = await fetch(`/api/services/${encodeURIComponent(id)}`, { method: 'PUT', body: form });
+    const res = await csrfFetch(`/api/services/${encodeURIComponent(id)}`, { method: 'PUT', body: form });
     const data = await res.json();
     if (data.success) {
       resultPre.textContent = 'Saved!';

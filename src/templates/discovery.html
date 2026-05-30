@@ -95,7 +95,7 @@ async function runDetection() {
   progress.style.display = '';
   banner.style.display = 'none';
   try {
-    const res = await fetch('/api/detect-service-paths', { method: 'POST' });
+    const res = await csrfFetch('/api/detect-service-paths', { method: 'POST' });
     const data = await res.json();
     if (res.ok) {
       showBanner(banner, true, `Detection complete — found config files for ${data.detected} service(s).`);
@@ -144,7 +144,7 @@ async function loadDetectedPaths() {
 
 async function clearDetectedPath(serviceId) {
   if (!confirm(`Remove detected config path for ${serviceId}?`)) return;
-  const res = await fetch(`/api/detected-service-paths/${encodeURIComponent(serviceId)}`, { method: 'DELETE' });
+  const res = await csrfFetch(`/api/detected-service-paths/${encodeURIComponent(serviceId)}`, { method: 'DELETE' });
   if (res.ok) await loadDetectedPaths();
 }
 
@@ -163,7 +163,7 @@ async function runDiscoveryScan() {
   if (dirs) body.append('search_dirs', dirs);
 
   try {
-    const res = await fetch('/api/discover-keys', { method: 'POST', body });
+    const res = await csrfFetch('/api/discover-keys', { method: 'POST', body });
     const data = await res.json();
     if (res.ok) {
       showBanner(banner, true, `Scan complete — found ${data.found} new key(s).`);
@@ -230,7 +230,7 @@ async function applyKey(id) {
   btn.disabled = true;
   btn.textContent = 'Applying…';
   try {
-    const res = await fetch(`/api/discovered-keys/${id}/apply`, { method: 'POST' });
+    const res = await csrfFetch(`/api/discovered-keys/${id}/apply`, { method: 'POST' });
     const data = await res.json();
     if (data.success) {
       showBanner(document.getElementById('scan-result-banner'), true,
@@ -257,7 +257,7 @@ async function applyAllKeys() {
   btn.disabled = true;
   btn.textContent = 'Applying all…';
   try {
-    const res = await fetch('/api/discovered-keys/apply-all', { method: 'POST' });
+    const res = await csrfFetch('/api/discovered-keys/apply-all', { method: 'POST' });
     const data = await res.json();
     if (data.applied_count > 0) {
       showBanner(document.getElementById('scan-result-banner'), true,
@@ -277,7 +277,7 @@ async function applyAllKeys() {
 
 async function clearDiscoveredKeys() {
   if (!confirm('Remove all discovered keys from the cache?')) return;
-  await fetch('/api/discovered-keys', { method: 'DELETE' });
+  await csrfFetch('/api/discovered-keys', { method: 'DELETE' });
   await loadDiscoveredKeys();
 }
 

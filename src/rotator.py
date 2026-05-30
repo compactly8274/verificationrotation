@@ -50,9 +50,11 @@ def _health_check(url: str, expected_key: Optional[str] = None, timeout: int = 1
     try:
         import ssl
         import urllib.request
+        from src.config import settings as _s
         ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        if _s.health_check_skip_ssl:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
         req = urllib.request.Request(url, method="GET")
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
             body = resp.read().decode("utf-8", errors="ignore")
