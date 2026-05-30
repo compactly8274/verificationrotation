@@ -192,12 +192,10 @@ def get_bw_session() -> Optional[str]:
 async def lifespan(app: FastAPI):
     await init_db()
     await _seed_services()
-    # Warm up Bitwarden session from pre-configured credentials (runs in thread pool
-    # so the slow bw CLI calls don't block the event loop at startup)
+    # Warm up Bitwarden session in a background thread — do NOT await so uvicorn
+    # starts accepting requests immediately rather than waiting for bw CLI calls.
     if settings.bw_client_id and settings.bw_client_secret and settings.bw_master_password:
-        import asyncio
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, get_bw_session)
+        asyncio.get_event_loop().run_in_executor(None, get_bw_session)
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         _background_scan, "interval",
@@ -214,7 +212,7 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     scheduler.add_job(
         _background_scan, "date",
-        run_date=datetime.now() + timedelta(seconds=10),
+        run_date=datetime.now() + timedelta(seconds=5),
         id="initial_scan",
     )
     yield
@@ -304,12 +302,17 @@ async def _background_scan():
 
             scan_heartbeat = datetime.now()
 
-            index = build_scan_index(
-                services, env,
-                env_path=settings.env_file,
-                skip_remote=False,
-                cache_max_age=settings.cache_max_age_hours,
-                remote_hosts=db_hosts,
+            # Run the synchronous scan in a thread pool so the event loop (and
+            # therefore the web UI) stays responsive throughout the scan.
+            index = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: build_scan_index(
+                    services, env,
+                    env_path=settings.env_file,
+                    skip_remote=False,
+                    cache_max_age=settings.cache_max_age_hours,
+                    remote_hosts=db_hosts,
+                ),
             )
             scan_index = index
             last_scan_time = datetime.now()
@@ -406,7 +409,10 @@ async def _auto_rotate_stale():
 
             global scan_index
             if not scan_index:
-                scan_index = build_scan_index(services, env, env_path=settings.env_file, remote_hosts=db_hosts)
+                scan_index = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: build_scan_index(services, env, env_path=settings.env_file, remote_hosts=db_hosts),
+                )
 
             # Fetch hit counts for all stale services in one query
             async with async_session() as session:
