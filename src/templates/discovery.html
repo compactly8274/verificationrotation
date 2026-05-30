@@ -64,6 +64,7 @@
     <button id="btn-scan" class="primary" onclick="runDiscoveryScan()">Scan Now</button>
     <button class="secondary outline" onclick="loadDiscoveredKeys()">Refresh Results</button>
     <button class="contrast outline" onclick="clearDiscoveredKeys()" style="margin-left:auto">Clear Cache</button>
+    <button class="secondary outline" onclick="applyAllKeys(event)">Apply All</button>
   </footer>
 </article>
 
@@ -224,13 +225,53 @@ async function loadDiscoveredKeys() {
 }
 
 async function applyKey(id) {
-  if (!confirm('Write this discovered value to your .env file?\n\nThe app will use the new value after its next restart or reload.')) return;
-  const res = await fetch(`/api/discovered-keys/${id}/apply`, { method: 'POST' });
-  const data = await res.json();
-  if (res.ok) {
+  if (!confirm('Apply this discovered key and propagate it to all locations (files, DBs, remote hosts)?\n\nThis will run a full key rotation.')) return;
+  const btn = event.target;
+  btn.disabled = true;
+  btn.textContent = 'Applying…';
+  try {
+    const res = await fetch(`/api/discovered-keys/${id}/apply`, { method: 'POST' });
+    const data = await res.json();
+    if (data.success) {
+      showBanner(document.getElementById('scan-result-banner'), true,
+        `Key for ${data.env_var} applied and propagated successfully.`);
+    } else {
+      showBanner(document.getElementById('scan-result-banner'), false,
+        `Apply failed: ${data.log || data.detail || 'unknown error'}`);
+    }
     await loadDiscoveredKeys();
-  } else {
-    alert('Failed to apply key: ' + (data.detail || JSON.stringify(data)));
+    if (typeof loadServices === 'function') loadServices();
+  } catch (err) {
+    showBanner(document.getElementById('scan-result-banner'), false, 'Network error: ' + err);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = id ? 'Re-apply' : 'Apply';
+  }
+}
+
+async function applyAllKeys() {
+  const keys = document.querySelectorAll('#discovered-container button.primary');
+  if (!keys.length) { alert('No unapplied high-confidence keys found.'); return; }
+  if (!confirm(`Apply all high-confidence discovered keys?\n\nEach key will be propagated to all its locations (files, DBs, remote hosts).`)) return;
+  const btn = event.target;
+  btn.disabled = true;
+  btn.textContent = 'Applying all…';
+  try {
+    const res = await fetch('/api/discovered-keys/apply-all', { method: 'POST' });
+    const data = await res.json();
+    if (data.applied_count > 0) {
+      showBanner(document.getElementById('scan-result-banner'), true,
+        `Applied ${data.applied_count} of ${data.total} key(s) successfully.`);
+    } else {
+      showBanner(document.getElementById('scan-result-banner'), false, 'No keys were applied.');
+    }
+    await loadDiscoveredKeys();
+    if (typeof loadServices === 'function') loadServices();
+  } catch (err) {
+    showBanner(document.getElementById('scan-result-banner'), false, 'Network error: ' + err);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Apply All';
   }
 }
 
