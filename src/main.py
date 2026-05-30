@@ -1201,34 +1201,39 @@ async def api_ssh_keys_delete(request: Request, key_id: int):
 async def api_detect_service_paths(request: Request):
     """Scan DISCOVERY_SEARCH_DIRS for known service config files and persist paths."""
     require_auth(request)
-    search_dirs = [
-        d.strip()
-        for d in settings.discovery_search_dirs.replace(":", ",").split(",")
-        if d.strip()
-    ]
-    loop = asyncio.get_event_loop()
-    detected = await loop.run_in_executor(None, lambda: detect_service_paths(search_dirs))
+    try:
+        search_dirs = [
+            d.strip()
+            for d in settings.discovery_search_dirs.replace(":", ",").split(",")
+            if d.strip()
+        ]
+        loop = asyncio.get_running_loop()
+        detected = await loop.run_in_executor(None, lambda: detect_service_paths(search_dirs))
 
-    results = []
-    async with async_session() as session:
-        for sid, config_path in detected.items():
-            sig = APP_SIGNATURES.get(sid, {})
-            await session.execute(
-                update(Service).where(Service.id == sid).values(
-                    detected_config_path=config_path,
-                    detected_config_format=sig.get("format"),
+        results = []
+        async with async_session() as session:
+            for sid, config_path in detected.items():
+                sig = APP_SIGNATURES.get(sid, {})
+                await session.execute(
+                    update(Service).where(Service.id == sid).values(
+                        detected_config_path=config_path,
+                        detected_config_format=sig.get("format"),
+                    )
                 )
-            )
-            results.append({"service_id": sid, "config_path": config_path, "format": sig.get("format")})
-        await session.commit()
+                results.append({"service_id": sid, "config_path": config_path, "format": sig.get("format")})
+            await session.commit()
 
-    # Attach display names
-    async with async_session() as session:
-        name_map = {r.id: r.display_name for r in (await session.execute(select(Service))).scalars().all()}
-    for r in results:
-        r["display_name"] = name_map.get(r["service_id"], r["service_id"])
+        # Attach display names
+        async with async_session() as session:
+            rows = (await session.execute(select(Service))).scalars().all()
+            name_map = {r.id: r.display_name for r in rows}
+        for r in results:
+            r["display_name"] = name_map.get(r["service_id"], r["service_id"])
 
-    return {"detected": len(results), "results": results}
+        return {"detected": len(results), "results": results}
+    except Exception as exc:
+        logger.exception("detect-service-paths failed")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/api/detected-service-paths")
