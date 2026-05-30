@@ -113,12 +113,20 @@ def bw_login(
         return None, str(exc)
 
 
+def _bw_env(session: str) -> dict[str, str]:
+    """Return environment dict with BW_SESSION set, avoiding --session CLI flag."""
+    env = os.environ.copy()
+    env["BW_SESSION"] = session
+    return env
+
+
 def bw_get_session() -> Optional[str]:
     session = os.environ.get("BW_SESSION", "").strip()
     if session:
         try:
             subprocess.run(
-                ["bw", "sync", "--session", session],
+                ["bw", "sync"],
+                env=_bw_env(session),
                 capture_output=True, check=True, timeout=30,
             )
             return session
@@ -152,7 +160,8 @@ def bw_search_item(session: str, item_name: Optional[str] = None, uri: Optional[
         return None
     try:
         result = subprocess.run(
-            ["bw", "list", "items", "--search", search_term, "--session", session],
+            ["bw", "list", "items", "--search", search_term],
+            env=_bw_env(session),
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode != 0:
@@ -175,7 +184,8 @@ def bw_search_item(session: str, item_name: Optional[str] = None, uri: Optional[
 def bw_update_password(session: str, item_id: str, new_password: str, field: str = "password") -> bool:
     try:
         result = subprocess.run(
-            ["bw", "get", "item", item_id, "--session", session],
+            ["bw", "get", "item", item_id],
+            env=_bw_env(session),
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode != 0:
@@ -199,7 +209,8 @@ def bw_update_password(session: str, item_id: str, new_password: str, field: str
         if encoded.returncode != 0:
             return False
         save_result = subprocess.run(
-            ["bw", "edit", "item", item_id, encoded.stdout.strip(), "--session", session],
+            ["bw", "edit", "item", item_id, encoded.stdout.strip()],
+            env=_bw_env(session),
             capture_output=True, text=True, timeout=30,
         )
         return save_result.returncode == 0
@@ -212,11 +223,13 @@ def bw_create_item(session: str, name: str, password: str, uri: Optional[str] = 
     try:
         # Get templates
         item_tpl = subprocess.run(
-            ["bw", "get", "template", "item", "--session", session],
+            ["bw", "get", "template", "item"],
+            env=_bw_env(session),
             capture_output=True, text=True, timeout=30,
         )
         login_tpl = subprocess.run(
-            ["bw", "get", "template", "item.login", "--session", session],
+            ["bw", "get", "template", "item.login"],
+            env=_bw_env(session),
             capture_output=True, text=True, timeout=30,
         )
         if item_tpl.returncode != 0 or login_tpl.returncode != 0:
@@ -238,7 +251,8 @@ def bw_create_item(session: str, name: str, password: str, uri: Optional[str] = 
         if encoded.returncode != 0:
             return None
         create_result = subprocess.run(
-            ["bw", "create", "item", encoded.stdout.strip(), "--session", session],
+            ["bw", "create", "item", encoded.stdout.strip()],
+            env=_bw_env(session),
             capture_output=True, text=True, timeout=30,
         )
         if create_result.returncode == 0:

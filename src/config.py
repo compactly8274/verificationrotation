@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     # Docker
     docker_socket: Path = Field(default=Path("/var/run/docker.sock"), alias="DOCKER_SOCKET")
 
+    # Security
+    cookie_https_only: bool = Field(default=True, alias="COOKIE_HTTPS_ONLY")
+    health_check_skip_ssl: bool = Field(default=False, alias="HEALTH_CHECK_SKIP_SSL")
+
     # Key Discovery
     discovery_search_dirs: str = Field(
         default="/mnt/user/appdata,/boot/config,/opt,/home",

@@ -21,6 +21,10 @@ from fastapi import FastAPI, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from itsdangerous import SignatureExpired, URLSafeTimedSerializer
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 from sqlalchemy import select, update
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -170,6 +174,31 @@ def require_auth(request: Request):
         raise HTTPException(status_code=303, detail="/login")
 
 
+def generate_csrf_token(request: Request) -> str:
+    """Generate a CSRF token tied to the current session."""
+    session_id = request.session.get("id", "")
+    return _csrf_signer.dumps(session_id)
+
+
+def verify_csrf_token(request: Request) -> None:
+    """Verify the CSRF token from the X-CSRF-Token header.
+
+    Raises HTTPException(403) on invalid or missing token.
+    """
+    token = request.headers.get("x-csrf-token", "")
+    if not token:
+        raise HTTPException(status_code=403, detail="Missing CSRF token")
+    session_id = request.session.get("id", "")
+    try:
+        data = _csrf_signer.loads(token, max_age=3600)
+        if data != session_id:
+            raise HTTPException(status_code=403, detail="Invalid CSRF token")
+    except SignatureExpired:
+        raise HTTPException(status_code=403, detail="CSRF token expired")
+    except Exception:
+        raise HTTPException(status_code=403, detail="Invalid CSRF token")
+
+
 def get_bw_session() -> Optional[str]:
     """Return in-memory session, falling back to env-var session, then auto-auth from config."""
     global _bw_session
@@ -231,7 +260,44 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="VerificationRotation", lifespan=lifespan)
-app.add_middleware(SessionMiddleware, secret_key=settings.secret_key, max_age=3600 * 24 * 7, same_site="strict", https_only=False)
+app.add_middleware(SessionMiddleware, secret_key=settings.secret_key, max_age=3600 * 24 * 7, same_site="strict", https_only=settings.cookie_https_only)
+
+# Rate limiting
+limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# CSRF token signing — uses the same secret key
+_csrf_signer = URLSafeTimedSerializer(settings.secret_key, salt="csrf")
+
+# Paths exempt from CSRF checks (login sets up the session, SSE is read-only)
+_CSRF_EXEMPT = {"/login"}
+
+
+@app.middleware("http")
+async def csrf_middleware(request: Request, call_next):
+    """Reject mutating requests lacking a valid CSRF token, unless exempt."""
+    if request.method in ("POST", "PUT", "DELETE"):
+        path = request.url.path
+        # Exempt login endpoints (no session yet) and SSE stream (read-only)
+        if path in _CSRF_EXEMPT or path.endswith("/stream"):
+            return await call_next(request)
+        # Allow unauthenticated paths through — require_auth handles them
+        if not request.session.get("authenticated"):
+            return await call_next(request)
+        # Authenticated mutating request — require CSRF
+        token = request.headers.get("x-csrf-token", "")
+        if not token:
+            return JSONResponse({"detail": "Missing CSRF token"}, status_code=403)
+        session_id = request.session.get("id", "")
+        try:
+            data = _csrf_signer.loads(token, max_age=3600)
+            if data != session_id:
+                return JSONResponse({"detail": "Invalid CSRF token"}, status_code=403)
+        except Exception:
+            return JSONResponse({"detail": "Invalid or expired CSRF token"}, status_code=403)
+    return await call_next(request)
+
 app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -502,9 +568,12 @@ async def login_page(request: Request):
 
 
 @app.post("/login")
+@limiter.limit("5/minute")
 async def login_post(request: Request, password: str = Form(...)):
     if verify_password(password):
+        import uuid
         request.session["authenticated"] = True
+        request.session["id"] = str(uuid.uuid4())
         return RedirectResponse(url="/", status_code=303)
     return templates.TemplateResponse(request, "login.html", {"error": "Invalid password"}, status_code=401)
 
@@ -513,6 +582,13 @@ async def login_post(request: Request, password: str = Form(...)):
 async def logout(request: Request):
     request.session.clear()
     return RedirectResponse(url="/login", status_code=303)
+
+
+@app.get("/api/csrf-token")
+async def api_csrf_token(request: Request):
+    """Return a CSRF token for the current session (requires auth)."""
+    require_auth(request)
+    return {"csrf_token": generate_csrf_token(request)}
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -546,6 +622,7 @@ async def api_bw_status(request: Request):
 
 
 @app.post("/api/bitwarden/login")
+@limiter.limit("5/minute")
 async def api_bw_login(
     request: Request,
     email: str = Form(...),
@@ -567,6 +644,7 @@ async def api_bw_login(
 
 
 @app.post("/api/bitwarden/login-apikey")
+@limiter.limit("5/minute")
 async def api_bw_login_apikey(
     request: Request,
     client_id: str = Form(...),
@@ -604,6 +682,7 @@ async def api_bw_debug(request: Request):
 
 
 @app.post("/api/bitwarden/unlock")
+@limiter.limit("5/minute")
 async def api_bw_unlock(request: Request, master_password: str = Form(...)):
     require_auth(request)
     global _bw_session
@@ -623,6 +702,7 @@ async def api_bw_unlock(request: Request, master_password: str = Form(...)):
 
 
 @app.post("/api/bitwarden/lock")
+@limiter.limit("5/minute")
 async def api_bw_lock(request: Request):
     require_auth(request)
     global _bw_session
@@ -689,6 +769,7 @@ async def api_scan_status(request: Request):
 
 
 @app.post("/api/rotate/{service_id}")
+@limiter.limit("10/minute")
 async def api_rotate(
     request: Request,
     service_id: str,
@@ -892,6 +973,7 @@ async def api_rotate_stream(
 
 
 @app.post("/api/rotate-all")
+@limiter.limit("2/minute")
 async def api_rotate_all(
     request: Request,
     dry_run: bool = Form(False),
@@ -1204,6 +1286,14 @@ async def api_discover_keys(
 
     raw_dirs = search_dirs or settings.discovery_search_dirs
     dir_list = [d.strip() for d in raw_dirs.replace(":", ",").split(",") if d.strip()]
+
+    # Validate user-supplied dirs against the configured allowed bases
+    if search_dirs:  # only validate when user overrides the defaults
+        allowed_bases = [d.strip() for d in settings.discovery_search_dirs.replace(":", ",").split(",") if d.strip()]
+        for d in dir_list:
+            if not any(d.startswith(ab) for ab in allowed_bases):
+                raise HTTPException(400, f"Search directory {d!r} is outside allowed bases: {allowed_bases}")
+
     skip_set = {
         s.strip()
         for s in settings.discovery_skip_dirs.split(",")
@@ -1458,6 +1548,7 @@ async def api_clear_discovered_keys(request: Request):
 
 
 @app.post("/api/reset-password")
+@limiter.limit("3/15minute")
 async def api_reset_password(request: Request, reset_key: str = Form(...), new_password: str = Form(...)):
     require_auth(request)
     if not verify_reset_key(reset_key):
