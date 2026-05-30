@@ -21,6 +21,8 @@ class Service(Base):
     hit_count = Column(Integer, default=0)
     status = Column(String, default="ok")  # ok, stale, missing, error
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    detected_config_path = Column(String(512), nullable=True)
+    detected_config_format = Column(String(32), nullable=True)
 
 
 class RotationHistory(Base):

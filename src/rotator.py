@@ -522,8 +522,9 @@ def rotate(
             if svc.docker_name:
                 print(f"  Stopping '{svc.docker_name}' before writing config file...")
                 stop_docker_container(svc.docker_name)
-            # *arr apps use 32-char lowercase hex keys; secrets.token_hex(16) matches.
-            generated = secrets.token_hex(16)
+            # Password services get a strong mixed-character password;
+            # API-key services get a 32-char hex string matching *arr format.
+            generated = generate_password() if is_password_service(svc) else secrets.token_hex(16)
             if svc.auto_write(generated):
                 local_new_key = generated
                 logger.info("Generated and wrote new API key for %s", svc.env_var)
