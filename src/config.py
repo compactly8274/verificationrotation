@@ -85,11 +85,19 @@ if _readable_env_file is None and _env_file.exists():
         "Fix with: chmod 644 .env"
     )
 
-# Warn and auto-generate if the secret key is still the default
+# Crash on startup if the secret key is still the default.
+# A persistent SECRET_KEY is required so that encrypted values in the DB
+# survive container restarts and so session cookies remain valid.
 if settings.secret_key == "change-me-in-production":
-    generated = secrets.token_urlsafe(32)
-    logger.warning(
-        "SECRET_KEY is set to the default value. A random key has been generated for this session. "
-        "Set SECRET_KEY in your .env file for persistent sessions."
+    logger.error(
+        "FATAL: SECRET_KEY is set to the default value. "
+        "Set a persistent SECRET_KEY in your .env file before starting the container."
     )
-    settings.secret_key = generated
+    raise SystemExit(1)
+
+# Loud warning if SSL verification is disabled for health checks.
+if settings.health_check_skip_ssl:
+    logger.warning(
+        "HEALTH_CHECK_SKIP_SSL is enabled — SSL certificates will not be verified "
+        "during health checks. This is insecure and should only be used for local testing."
+    )

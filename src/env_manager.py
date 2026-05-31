@@ -76,7 +76,7 @@ def read_env(path: Path) -> dict[str, str]:
             v = v.strip()
             if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
                 v = v[1:-1]
-                if v[0] == '"':
+                if v and v[0] == '"':
                     v = _unescape_env_value(v)
             result[k] = v
     return result

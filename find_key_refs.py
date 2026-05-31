@@ -68,12 +68,27 @@ def main() -> None:
     parser.add_argument("--dirs", nargs="+", default=SEARCH_DIRS,
                         help="Directories to search (default: Unraid appdata paths)")
     parser.add_argument("--key", help="Key value to search for (prompted if omitted)")
+    parser.add_argument("--key-file", type=Path, help="File containing the key value to search for")
     args = parser.parse_args()
+
+    if args.key:
+        print(
+            "WARNING: --key exposes the secret in process listings and shell history. "
+            "Consider using --key-file instead.",
+            file=sys.stderr,
+        )
 
     print(f"Searching: {', '.join(args.dirs)}")
     print()
 
     key = args.key
+    if args.key_file:
+        try:
+            key = args.key_file.read_text().strip()
+        except OSError as exc:
+            print(f"ERROR: Could not read key file: {exc}", file=sys.stderr)
+            sys.exit(1)
+
     while True:
         if not key:
             try:

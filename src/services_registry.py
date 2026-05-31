@@ -81,6 +81,8 @@ def _arr_xml_write(path: str) -> Callable[[str], bool]:
     def _write(new_key: str) -> bool:
         try:
             fp = Path(path)
+            if fp.is_symlink():
+                return False
             text = fp.read_text()
             updated = _pat.sub(rf'\g<1>{new_key}\g<2>', text)
             if updated == text:
@@ -109,6 +111,8 @@ def _xml_tag_write(path: str, tag: str) -> Callable[[str], bool]:
     def _write(new_key: str) -> bool:
         try:
             fp = Path(path)
+            if fp.is_symlink():
+                return False
             text = fp.read_text()
             updated = _pat.sub(rf'\g<1>{new_key}\g<2>', text)
             if updated == text:

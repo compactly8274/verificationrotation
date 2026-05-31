@@ -181,8 +181,10 @@ def scan_dbs_for_keys(key_db_refs: dict[str, list]) -> dict[str, list[str]]:
             continue
         try:
             con = sqlite3.connect(f"file:{dp}?mode=ro", uri=True)
-            rows = con.execute(f"SELECT {col} FROM {table}").fetchall()
-            con.close()
+            try:
+                rows = con.execute(f"SELECT {col} FROM {table}").fetchall()
+            finally:
+                con.close()
         except Exception:
             continue
         for (blob,) in rows:

@@ -24,7 +24,7 @@ logger = logging.getLogger("verificationrotation")
 
 
 def generate_password(length: int = 32) -> str:
-    alphabet = string.ascii_letters + string.digits + "!@#$%^*&*-_+=.?"
+    alphabet = string.ascii_letters + string.digits + "!@#$%^&*_-+=.?"
     while True:
         pwd = "".join(secrets.choice(alphabet) for _ in range(length))
         if (any(c.islower() for c in pwd)
@@ -77,14 +77,18 @@ def _backup_dir(env_path: Path) -> Path:
 
 
 def _backup_file(src: Path, backup_dir: Path) -> Path:
-    dest = backup_dir / src.name
+    # Preserve directory structure under the backup dir to avoid basename collisions.
+    rel = str(src.resolve()).lstrip("/")
+    dest = backup_dir / rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, dest)
     return dest
 
 
 def _restore_from_backup(backup_dir: Path, targets: list[Path]) -> None:
     for target in targets:
-        src = backup_dir / target.name
+        rel = str(target.resolve()).lstrip("/")
+        src = backup_dir / rel
         if src.exists():
             shutil.copy2(src, target)
             print(f"  Restored {target} from backup")
@@ -174,22 +178,24 @@ def replace_in_dbs(old: str, new: str, db_refs: list) -> list[str]:
             backup = dp.with_suffix(".db.bak")
             shutil.copy2(dp, backup)
             con = sqlite3.connect(dp)
-            cur = con.execute(f"SELECT rowid, {col} FROM {table}")
-            rows = cur.fetchall()
-            updated = 0
-            for rowid, blob in rows:
-                if blob and _key_matches(old, blob):
-                    con.execute(
-                        f"UPDATE {table} SET {col}=? WHERE rowid=?",
-                        (_key_replace(old, new, blob), rowid),
-                    )
-                    updated += 1
-            if updated:
-                con.commit()
-                changed.append(f"{db_path_str}  ({table}.{col}, {updated} row(s))")
-            else:
-                backup.unlink(missing_ok=True)
-            con.close()
+            try:
+                cur = con.execute(f"SELECT rowid, {col} FROM {table}")
+                rows = cur.fetchall()
+                updated = 0
+                for rowid, blob in rows:
+                    if blob and _key_matches(old, blob):
+                        con.execute(
+                            f"UPDATE {table} SET {col}=? WHERE rowid=?",
+                            (_key_replace(old, new, blob), rowid),
+                        )
+                        updated += 1
+                if updated:
+                    con.commit()
+                    changed.append(f"{db_path_str}  ({table}.{col}, {updated} row(s))")
+                else:
+                    backup.unlink(missing_ok=True)
+            finally:
+                con.close()
         except Exception as e:
             print(f"  WARNING: SQLite update failed for {db_path_str}: {e}")
     return changed
@@ -325,12 +331,14 @@ def _rescan_for_key(key: str, file_hits: list[str], db_refs: list, remote_hosts:
             continue
         try:
             con = sqlite3.connect(f"file:{dp}?mode=ro", uri=True)
-            rows = con.execute(f"SELECT {col} FROM {table}").fetchall()
-            con.close()
-            for (blob,) in rows:
-                if blob and _key_matches(key, blob):
-                    remaining.append(f"{db_path_str} ({table}.{col})")
-                    break
+            try:
+                rows = con.execute(f"SELECT {col} FROM {table}").fetchall()
+                for (blob,) in rows:
+                    if blob and _key_matches(key, blob):
+                        remaining.append(f"{db_path_str} ({table}.{col})")
+                        break
+            finally:
+                con.close()
         except Exception:
             pass
     for rh in remote_hosts:

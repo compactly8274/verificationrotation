@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI, Form, HTTPException, Request, Response
@@ -146,17 +147,17 @@ def verify_password(password: str) -> bool:
     if not settings.admin_password:
         return False
     stored = settings.admin_password
-    # Support bcrypt-hashed passwords ($2b$ prefix)
+    # Support bcrypt-hashed passwords ($2b$ / $2a$ prefix)
     if stored.startswith("$2b$") or stored.startswith("$2a$"):
         import bcrypt as _bcrypt
         try:
             return _bcrypt.checkpw(password.encode(), stored.encode())
         except Exception:
             return False
-    # Plaintext fallback for backward compatibility
-    if not stored.startswith("change-me"):
-        logger.warning("ADMIN_PASSWORD is stored in plaintext — consider hashing with bcrypt")
-    return hmac.compare_digest(password, stored)
+    # Plaintext passwords are no longer accepted — they expose the admin
+    # credential in environment variables and process listings.
+    logger.warning("ADMIN_PASSWORD is stored in plaintext — login rejected")
+    return False
 
 
 def verify_reset_key(key: str) -> bool:
@@ -284,8 +285,8 @@ async def csrf_middleware(request: Request, call_next):
     """Reject mutating requests lacking a valid CSRF token, unless exempt."""
     if request.method in ("POST", "PUT", "DELETE"):
         path = request.url.path
-        # Exempt login endpoints (no session yet) and SSE stream (read-only)
-        if path in _CSRF_EXEMPT or path.endswith("/stream"):
+        # Exempt login endpoints (no session yet)
+        if path in _CSRF_EXEMPT:
             return await call_next(request)
         # Allow unauthenticated paths through — require_auth handles them
         if not request.session.get("authenticated"):
@@ -302,6 +303,28 @@ async def csrf_middleware(request: Request, call_next):
         except Exception:
             return JSONResponse({"detail": "Invalid or expired CSRF token"}, status_code=403)
     return await call_next(request)
+
+
+@app.middleware("http")
+async def security_headers_middleware(request: Request, call_next):
+    """Add security headers to all responses."""
+    response = await call_next(request)
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "connect-src 'self'; "
+        "font-src 'self'; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'"
+    )
+    return response
 
 app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
@@ -626,6 +649,18 @@ async def api_bw_status(request: Request):
     }
 
 
+def _validate_bw_server_url(server_url: str) -> None:
+    """Reject non-HTTPS Bitwarden server URLs."""
+    if not server_url:
+        return
+    parsed = urlparse(server_url)
+    if parsed.scheme != "https":
+        raise HTTPException(
+            status_code=400,
+            detail="Bitwarden server URL must use HTTPS",
+        )
+
+
 @app.post("/api/bitwarden/login")
 @limiter.limit("5/minute")
 async def api_bw_login(
@@ -638,6 +673,7 @@ async def api_bw_login(
 ):
     """Log in to Bitwarden (needed on first run or after container restart)."""
     require_auth(request)
+    _validate_bw_server_url(server_url)
     global _bw_session
     if not bw_available():
         raise HTTPException(status_code=503, detail="Bitwarden CLI not installed")
@@ -659,6 +695,7 @@ async def api_bw_login_apikey(
 ):
     """Authenticate via Bitwarden personal API key (no MFA needed) then unlock vault."""
     require_auth(request)
+    _validate_bw_server_url(server_url)
     global _bw_session
     if not bw_available():
         raise HTTPException(status_code=503, detail="Bitwarden CLI not installed")
@@ -671,17 +708,10 @@ async def api_bw_login_apikey(
 
 @app.get("/api/bitwarden/debug")
 async def api_bw_debug(request: Request):
-    """Return raw bw status output for troubleshooting."""
+    """Return parsed Bitwarden status (no raw CLI output to avoid leaking vault metadata)."""
     require_auth(request)
     try:
-        import subprocess as _sp
-        result = _sp.run(["bw", "status"], capture_output=True, text=True, timeout=15)
-        return {
-            "returncode": result.returncode,
-            "stdout": result.stdout.strip(),
-            "stderr": result.stderr.strip(),
-            "parsed": bw_status(),
-        }
+        return {"parsed": bw_status()}
     except Exception as exc:
         return {"error": str(exc)}
 
@@ -786,12 +816,6 @@ async def api_rotate(
     require_auth(request)
     global scan_index, rotation_in_progress
 
-    if not dry_run and (_rotation_is_running() or _rotation_lock.locked()):
-        raise HTTPException(
-            status_code=409,
-            detail=f"Rotation already in progress for '{rotation_in_progress['service_id']}'. Try again shortly.",
-        )
-
     _, _, _, _, services = load_rotate_keys_config(settings.descriptions_path)
     services = await _apply_detections(services)
     if service_id not in services:
@@ -811,7 +835,13 @@ async def api_rotate(
         known_hits = svc_row.hit_count if svc_row else -1
 
     if not dry_run:
-        rotation_in_progress = {"service_id": service_id, "started_at": datetime.now()}
+        async with _rotation_lock:
+            if _rotation_is_running():
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Rotation already in progress for '{rotation_in_progress['service_id']}'. Try again shortly.",
+                )
+            rotation_in_progress = {"service_id": service_id, "started_at": datetime.now()}
 
     logger.info("Rotating %s (dry_run=%s)", service_id, dry_run)
     rotation_log = {}
@@ -865,6 +895,7 @@ async def api_rotate(
 
 
 @app.get("/api/rotate/{service_id}/stream")
+@limiter.limit("10/minute")
 async def api_rotate_stream(
     request: Request,
     service_id: str,
@@ -872,16 +903,27 @@ async def api_rotate_stream(
     dry_run: bool = False,
     generate_password: bool = False,
     sync_bitwarden_flag: bool = False,
+    csrf_token: Optional[str] = None,
 ):
-    """Stream rotation output in real-time via Server-Sent Events."""
+    """Stream rotation output in real-time via Server-Sent Events.
+
+    Even though this is a GET endpoint, it performs state-changing work.
+    A CSRF token must be supplied via query parameter because EventSource
+    cannot set custom headers.
+    """
     require_auth(request)
     global scan_index, rotation_in_progress
 
-    if not dry_run and (_rotation_is_running() or _rotation_lock.locked()):
-        raise HTTPException(
-            status_code=409,
-            detail=f"Rotation already in progress for '{rotation_in_progress['service_id']}'. Try again shortly.",
-        )
+    # --- CSRF validation for state-changing GET ---
+    if not csrf_token:
+        raise HTTPException(status_code=403, detail="Missing CSRF token")
+    session_id = request.session.get("id", "")
+    try:
+        data = _csrf_signer.loads(csrf_token, max_age=3600)
+        if data != session_id:
+            raise HTTPException(status_code=403, detail="Invalid CSRF token")
+    except Exception:
+        raise HTTPException(status_code=403, detail="Invalid or expired CSRF token")
 
     _, _, _, _, services = load_rotate_keys_config(settings.descriptions_path)
     if service_id not in services:
@@ -900,7 +942,13 @@ async def api_rotate_stream(
         known_hits = svc_row.hit_count if svc_row else -1
 
     if not dry_run:
-        rotation_in_progress = {"service_id": service_id, "started_at": datetime.now()}
+        async with _rotation_lock:
+            if _rotation_is_running():
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Rotation already in progress for '{rotation_in_progress['service_id']}'. Try again shortly.",
+                )
+            rotation_in_progress = {"service_id": service_id, "started_at": datetime.now()}
 
     logger.info("Streaming rotation for %s (dry_run=%s)", service_id, dry_run)
     q: queue.Queue = queue.Queue()
@@ -931,19 +979,25 @@ async def api_rotate_stream(
     t.start()
 
     async def generate():
-        while t.is_alive() or not q.empty():
-            try:
-                line = q.get(timeout=0.2)
-                yield f"event: log\ndata: {json.dumps({'text': line})}\n\n"
-            except queue.Empty:
-                continue
-        t.join()
+        try:
+            while t.is_alive() or not q.empty():
+                try:
+                    line = q.get(timeout=0.2)
+                    yield f"event: log\ndata: {json.dumps({'text': line})}\n\n"
+                except queue.Empty:
+                    continue
+            t.join()
+        except GeneratorExit:
+            logger.info("Client disconnected during rotation stream for %s", service_id)
+            raise
+        finally:
+            if not dry_run:
+                rotation_in_progress = None
 
         ok = ok_result[0]
         logger.info("Streamed rotation %s %s", service_id, "succeeded" if ok else "failed")
 
         if not dry_run:
-            rotation_in_progress = None
             try:
                 async with async_session() as session:
                     if ok:
@@ -988,12 +1042,6 @@ async def api_rotate_all(
     require_auth(request)
     global scan_index, rotation_in_progress
 
-    if not dry_run and _rotation_is_running():
-        raise HTTPException(
-            status_code=409,
-            detail=f"Rotation already in progress for '{rotation_in_progress['service_id']}'.",
-        )
-
     _, _, _, _, services = load_rotate_keys_config(settings.descriptions_path)
     services = await _apply_detections(services)
     env = read_env(settings.env_file)
@@ -1011,6 +1059,15 @@ async def api_rotate_all(
     results = []
     eligible = [(sid, svc) for sid, svc in services.items() if svc.env_var and env.get(svc.env_var)]
     logger.info("Rotate-all starting for %d service(s) (dry_run=%s)", len(eligible), dry_run)
+
+    if not dry_run:
+        async with _rotation_lock:
+            if _rotation_is_running():
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Rotation already in progress for '{rotation_in_progress['service_id']}'.",
+                )
+
     for sid, svc in eligible:
         if not dry_run:
             rotation_in_progress = {"service_id": sid, "started_at": datetime.now()}
@@ -1356,9 +1413,10 @@ async def api_discover_keys(
 
     # Validate user-supplied dirs against the configured allowed bases
     if search_dirs:  # only validate when user overrides the defaults
-        allowed_bases = [d.strip() for d in settings.discovery_search_dirs.replace(":", ",").split(",") if d.strip()]
+        allowed_bases = [Path(d.strip()).resolve() for d in settings.discovery_search_dirs.replace(":", ",").split(",") if d.strip()]
         for d in dir_list:
-            if not any(d.startswith(ab) for ab in allowed_bases):
+            dp = Path(d).resolve()
+            if not any(dp.is_relative_to(ab) for ab in allowed_bases):
                 raise HTTPException(400, f"Search directory {d!r} is outside allowed bases: {allowed_bases}")
 
     skip_set = {

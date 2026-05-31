@@ -53,10 +53,22 @@ def read_ini(path: str, section: str, key: str) -> Optional[str]:
         return None
 
 
+def _check_symlink(fp: Path) -> bool:
+    """Return True if path is a symlink. Prevents writing through symlinks."""
+    try:
+        if fp.is_symlink():
+            return True
+    except OSError:
+        pass
+    return False
+
+
 def write_ini(path: str, section: str, key: str, value: str) -> bool:
     """Replace key's value within the named INI section, preserving all formatting."""
     try:
         fp = Path(path)
+        if _check_symlink(fp):
+            return False
         lines = fp.read_text(errors="ignore").splitlines(keepends=True)
         in_target = False
         replaced = False
@@ -99,6 +111,8 @@ def read_json(path: str, *key_path: Any) -> Optional[str]:
 def write_json(path: str, value: str, *key_path: Any) -> bool:
     try:
         fp = Path(path)
+        if _check_symlink(fp):
+            return False
         data = json.loads(fp.read_text(errors="ignore"))
         _set_nested(data, list(key_path), value)
         fp.write_text(json.dumps(data, indent=2) + "\n")
@@ -124,6 +138,8 @@ def write_yaml(path: str, value: Any, *key_path: Any) -> bool:
     try:
         import yaml
         fp = Path(path)
+        if _check_symlink(fp):
+            return False
         data = yaml.safe_load(fp.read_text(errors="ignore")) or {}
         _set_nested(data, list(key_path), value)
         fp.write_text(yaml.dump(data, default_flow_style=False, allow_unicode=True))
@@ -152,6 +168,8 @@ def write_toml(path: str, key: str, value: str) -> bool:
     """Replace a top-level TOML key using regex (preserves comments and formatting)."""
     try:
         fp = Path(path)
+        if _check_symlink(fp):
+            return False
         text = fp.read_text(errors="ignore")
         esc = re.escape(key)
         pattern = re.compile(rf'(?m)^({esc}\s*=\s*)["\']?[^"\'\n]*["\']?')
@@ -182,6 +200,8 @@ def read_env_file(path: str, key: str) -> Optional[str]:
 def write_env_file(path: str, key: str, value: str) -> bool:
     try:
         fp = Path(path)
+        if fp.exists() and _check_symlink(fp):
+            return False
         text = fp.read_text(errors="ignore") if fp.exists() else ""
         pattern = re.compile(rf"(?m)^{re.escape(key)}=.*$")
         updated, count = pattern.subn(f"{key}={value}", text)

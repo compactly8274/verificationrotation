@@ -114,7 +114,7 @@ async function loadScanStatus() {
     // Scan error banner
     if (errorBanner) {
       if (data.scan_errors && data.scan_errors.length > 0) {
-        errorBanner.innerHTML = '<strong>Scan errors:</strong> ' + data.scan_errors.map(e => `<div>⚠ ${e}</div>`).join('');
+        errorBanner.innerHTML = '<strong>Scan errors:</strong> ' + data.scan_errors.map(e => `<div>⚠ ${esc(e)}</div>`).join('');
         errorBanner.style.display = 'block';
       } else {
         errorBanner.style.display = 'none';
@@ -147,10 +147,12 @@ async function submitRotate(event) {
   const resultPre = document.getElementById('modal-result');
   resultPre.textContent = '';
 
+  const token = await getCsrfToken();
   const params = new URLSearchParams({
     dry_run: dryRun,
     generate_password: genPw,
     sync_bitwarden_flag: syncBw,
+    csrf_token: token || '',
   });
   if (newValue) params.set('new_value', newValue);
 

@@ -12,12 +12,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install Bitwarden CLI
 # Pinned version for supply-chain integrity; update BW_VERSION to upgrade.
+# Set BW_SHA256 to verify the downloaded archive (get it from the GitHub release page).
 ENV BW_VERSION=2025.5.0
+ARG BW_SHA256=""
 RUN curl -fsSL -o /tmp/bw.zip "https://github.com/bitwarden/clients/releases/download/cli-v${BW_VERSION}/bw-linux-${BW_VERSION}.zip" \
+    && if [ -n "$BW_SHA256" ]; then echo "$BW_SHA256  /tmp/bw.zip" | sha256sum -c -; fi \
     && unzip -o /tmp/bw.zip -d /usr/local/bin/ \
     && chmod +x /usr/local/bin/bw \
     && test -x /usr/local/bin/bw \
-    && rm /tmp/bw.zip
+    && rm /tmp/bw.zip \
+    && apt-get purge -y --auto-remove unzip \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
 COPY requirements.txt .
