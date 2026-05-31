@@ -235,7 +235,12 @@ async def lifespan(app: FastAPI):
     # Warm up Bitwarden session in a background thread — do NOT await so uvicorn
     # starts accepting requests immediately rather than waiting for bw CLI calls.
     if settings.bw_client_id and settings.bw_client_secret and settings.bw_master_password:
-        asyncio.get_event_loop().run_in_executor(None, get_bw_session)
+        def _bw_warmup():
+            try:
+                get_bw_session()
+            except Exception:
+                logger.exception("Bitwarden background auth failed at startup")
+        asyncio.get_running_loop().run_in_executor(None, _bw_warmup)
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         _background_scan, "interval",
@@ -381,7 +386,7 @@ async def _background_scan():
 
             # Run the synchronous scan in a thread pool so the event loop (and
             # therefore the web UI) stays responsive throughout the scan.
-            index = await asyncio.get_event_loop().run_in_executor(
+            index = await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: build_scan_index(
                     services, env,
@@ -486,7 +491,7 @@ async def _auto_rotate_stale():
 
             global scan_index
             if not scan_index:
-                scan_index = await asyncio.get_event_loop().run_in_executor(
+                scan_index = await asyncio.get_running_loop().run_in_executor(
                     None,
                     lambda: build_scan_index(services, env, env_path=settings.env_file, remote_hosts=db_hosts),
                 )
@@ -1308,8 +1313,7 @@ async def api_discover_keys(
     _, _, _, _, services = load_rotate_keys_config(settings.descriptions_path)
     env = read_env(settings.env_file)
 
-    loop = asyncio.get_event_loop()
-    results = await loop.run_in_executor(
+    results = await asyncio.get_running_loop().run_in_executor(
         None,
         lambda: discover_keys(services, env, dir_list, skip_set),
     )

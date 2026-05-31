@@ -102,8 +102,8 @@ def _parse_structured(fp: Path) -> Optional[object]:
             cp = configparser.ConfigParser()
             cp.read_string(text)
             return {s: dict(cp[s]) for s in cp.sections()}
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Could not parse %s as %s: %s", fp.name, ext or "structured", exc)
     return None
 
 

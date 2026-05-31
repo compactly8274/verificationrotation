@@ -32,15 +32,22 @@ def _run_migrations(sync_conn):
     """Add missing columns to existing tables (runs inside run_sync)."""
     from src.models import Base
 
-    # Ensure all tables exist (creates new ones, silently skips existing)
-    Base.metadata.create_all(sync_conn)
+    try:
+        # Ensure all tables exist (creates new ones, silently skips existing)
+        Base.metadata.create_all(sync_conn)
+    except Exception:
+        logger.exception("Failed to create database tables")
+        raise
 
     # Check existing columns and add any that are missing
-    result = sync_conn.execute(text("PRAGMA table_info('scan_log')"))
-    scan_log_cols = {row[1] for row in result}
-
-    result = sync_conn.execute(text("PRAGMA table_info('services')"))
-    services_cols = {row[1] for row in result}
+    try:
+        result = sync_conn.execute(text("PRAGMA table_info('scan_log')"))
+        scan_log_cols = {row[1] for row in result}
+        result = sync_conn.execute(text("PRAGMA table_info('services')"))
+        services_cols = {row[1] for row in result}
+    except Exception:
+        logger.exception("Failed to read database schema — skipping migrations")
+        return
 
     existing = {"scan_log": scan_log_cols, "services": services_cols}
 
@@ -48,10 +55,16 @@ def _run_migrations(sync_conn):
         if table not in existing:
             continue
         if column not in existing[table]:
-            sync_conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
-            logger.info("Migrated: added %s.%s", table, column)
+            try:
+                sync_conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}"))
+                logger.info("Migrated: added %s.%s", table, column)
+            except Exception:
+                logger.exception("Migration failed: could not add %s.%s", table, column)
 
-    sync_conn.commit()
+    try:
+        sync_conn.commit()
+    except Exception:
+        logger.exception("Failed to commit migrations")
 
 
 async def init_db():
