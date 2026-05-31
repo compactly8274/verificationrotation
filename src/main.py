@@ -46,7 +46,7 @@ from src.services_registry import (
     build_detected_writer,
     load_rotate_keys_config,
 )
-from src.ssh_keys import delete_ssh_key, generate_ssh_key
+from src.ssh_keys import delete_ssh_key, generate_ssh_key, get_ssh_key, test_ssh_connection
 
 logger = logging.getLogger("verificationrotation")
 
@@ -235,7 +235,12 @@ async def lifespan(app: FastAPI):
     # Warm up Bitwarden session in a background thread — do NOT await so uvicorn
     # starts accepting requests immediately rather than waiting for bw CLI calls.
     if settings.bw_client_id and settings.bw_client_secret and settings.bw_master_password:
-        asyncio.get_event_loop().run_in_executor(None, get_bw_session)
+        def _bw_warmup():
+            try:
+                get_bw_session()
+            except Exception:
+                logger.exception("Bitwarden background auth failed at startup")
+        asyncio.get_running_loop().run_in_executor(None, _bw_warmup)
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         _background_scan, "interval",
@@ -381,7 +386,7 @@ async def _background_scan():
 
             # Run the synchronous scan in a thread pool so the event loop (and
             # therefore the web UI) stays responsive throughout the scan.
-            index = await asyncio.get_event_loop().run_in_executor(
+            index = await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: build_scan_index(
                     services, env,
@@ -486,7 +491,7 @@ async def _auto_rotate_stale():
 
             global scan_index
             if not scan_index:
-                scan_index = await asyncio.get_event_loop().run_in_executor(
+                scan_index = await asyncio.get_running_loop().run_in_executor(
                     None,
                     lambda: build_scan_index(services, env, env_path=settings.env_file, remote_hosts=db_hosts),
                 )
@@ -1068,6 +1073,8 @@ async def api_hosts(request: Request):
                 "user": r.user,
                 "search_dirs": json.loads(r.search_dirs) if r.search_dirs else [],
                 "db_refs": json.loads(r.db_refs) if r.db_refs else [],
+                "ssh_key_name": r.ssh_key_name,
+                "ssh_public_key": r.ssh_public_key,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
             }
             for r in rows
@@ -1136,6 +1143,61 @@ async def api_hosts_delete(request: Request, host_id: int):
         await session.delete(row)
         await session.commit()
     return {"success": True}
+
+
+@app.post("/api/hosts/{host_id}/generate-key")
+async def api_hosts_generate_key(request: Request, host_id: int):
+    """Generate an ed25519 key pair for this host and return the public key + setup script."""
+    require_auth(request)
+    async with async_session() as session:
+        result = await session.execute(select(RemoteHost).where(RemoteHost.id == host_id))
+        row = result.scalar_one_or_none()
+        if not row:
+            raise HTTPException(status_code=404, detail="Host not found")
+        host_addr = row.host
+        user = row.user
+        key_name = f"host-{host_id}"
+
+        # Regenerate — remove any existing key first
+        delete_ssh_key(key_name)
+        try:
+            pub_key, _ = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: generate_ssh_key(key_name)
+            )
+        except Exception as exc:
+            logger.exception("SSH key generation failed for host %s", host_id)
+            raise HTTPException(status_code=500, detail=f"Key generation failed: {exc}")
+
+        row.ssh_key_name = key_name
+        row.ssh_public_key = pub_key
+        await session.commit()
+
+    home = "/root" if user == "root" else f"/home/{user}"
+    setup_script = (
+        f"mkdir -p {home}/.ssh && chmod 700 {home}/.ssh\n"
+        f"echo '{pub_key}' >> {home}/.ssh/authorized_keys\n"
+        f"chmod 600 {home}/.ssh/authorized_keys"
+    )
+    return {"public_key": pub_key, "setup_script": setup_script, "host": host_addr, "user": user}
+
+
+@app.post("/api/hosts/{host_id}/test-connection")
+async def api_hosts_test_connection(request: Request, host_id: int):
+    """Test SSH connectivity to this host using its generated key."""
+    require_auth(request)
+    async with async_session() as session:
+        result = await session.execute(select(RemoteHost).where(RemoteHost.id == host_id))
+        row = result.scalar_one_or_none()
+        if not row:
+            raise HTTPException(status_code=404, detail="Host not found")
+        if not row.ssh_key_name:
+            raise HTTPException(status_code=400, detail="No SSH key generated — click 'Connect' first")
+        key_name, user, host_addr = row.ssh_key_name, row.user, row.host
+
+    ok, msg = await asyncio.get_running_loop().run_in_executor(
+        None, lambda: test_ssh_connection(key_name, user, host_addr)
+    )
+    return {"connected": ok, "message": msg}
 
 
 # ---------------------------------------------------------------------------
@@ -1308,8 +1370,7 @@ async def api_discover_keys(
     _, _, _, _, services = load_rotate_keys_config(settings.descriptions_path)
     env = read_env(settings.env_file)
 
-    loop = asyncio.get_event_loop()
-    results = await loop.run_in_executor(
+    results = await asyncio.get_running_loop().run_in_executor(
         None,
         lambda: discover_keys(services, env, dir_list, skip_set),
     )

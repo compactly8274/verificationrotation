@@ -60,6 +60,8 @@ class RemoteHost(Base):
     user = Column(String, nullable=False)
     search_dirs = Column(Text, nullable=False, default="[]")  # JSON list
     db_refs = Column(Text, nullable=False, default="[]")     # JSON list of tuples
+    ssh_key_name = Column(String, nullable=True)             # name of key in data_dir/ssh_keys/
+    ssh_public_key = Column(Text, nullable=True)             # cached public key text
     created_at = Column(DateTime, server_default=func.now())
 
 

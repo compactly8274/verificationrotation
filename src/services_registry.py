@@ -41,18 +41,7 @@ _DEFAULT_SKIP_DIRS = {
     "previews", "Metadata", "Plug-in Support", "databases",
     "tv", "movies", "music", "photos", "downloads",
 }
-_DEFAULT_REMOTE_HOSTS = [
-    {
-        "label": "TrueNAS",
-        "host": "192.168.1.122",
-        "user": "root",
-        "search_dirs": ["/mnt/Data/appdata"],
-        "db_refs": [
-            ("/mnt/Data/appdata/prowlarr/prowlarr.db", "Applications", "Settings"),
-            ("/mnt/Data/appdata/prowlarr/prowlarr.db", "Indexers", "Settings"),
-        ],
-    },
-]
+_DEFAULT_REMOTE_HOSTS: list = []  # define remote hosts in rotate_keys.yaml → remote_hosts section
 _DB_REF_GROUPS: dict[str, list] = {
     "arr_indexer": [
         ("/mnt/user/appdata/sonarr/sonarr.db", "Indexers", "Settings"),
