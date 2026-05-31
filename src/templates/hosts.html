@@ -35,7 +35,7 @@
         <input type="text" id="host-label" name="label" placeholder="TrueNAS" required>
       </label>
       <label>Host/IP
-        <input type="text" id="host-host" name="host" placeholder="192.168.1.122" required>
+        <input type="text" id="host-host" name="host" placeholder="192.168.1.x" required>
       </label>
       <label>SSH User
         <input type="text" id="host-user" name="user" placeholder="root" required>
@@ -51,6 +51,18 @@
       </footer>
     </form>
     <pre id="host-modal-result"></pre>
+  </article>
+</dialog>
+
+<dialog id="connect-modal">
+  <article>
+    <header>
+      <button aria-label="Close" rel="prev" onclick="document.getElementById('connect-modal').close()"></button>
+      <h3>Connect Remote Host</h3>
+    </header>
+    <div id="connect-modal-body">
+      <article aria-busy="true">Generating SSH key…</article>
+    </div>
   </article>
 </dialog>
 {% endblock %}

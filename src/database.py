@@ -25,6 +25,8 @@ _MIGRATIONS = [
     ("services", "health_url", "VARCHAR"),
     ("services", "detected_config_path", "VARCHAR(512)"),
     ("services", "detected_config_format", "VARCHAR(32)"),
+    ("remote_hosts", "ssh_key_name", "VARCHAR"),
+    ("remote_hosts", "ssh_public_key", "TEXT"),
 ]
 
 
@@ -41,15 +43,13 @@ def _run_migrations(sync_conn):
 
     # Check existing columns and add any that are missing
     try:
-        result = sync_conn.execute(text("PRAGMA table_info('scan_log')"))
-        scan_log_cols = {row[1] for row in result}
-        result = sync_conn.execute(text("PRAGMA table_info('services')"))
-        services_cols = {row[1] for row in result}
+        existing: dict[str, set] = {}
+        for tbl in ("scan_log", "services", "remote_hosts"):
+            result = sync_conn.execute(text(f"PRAGMA table_info('{tbl}')"))
+            existing[tbl] = {row[1] for row in result}
     except Exception:
         logger.exception("Failed to read database schema — skipping migrations")
         return
-
-    existing = {"scan_log": scan_log_cols, "services": services_cols}
 
     for table, column, col_type in _MIGRATIONS:
         if table not in existing:

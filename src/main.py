@@ -46,7 +46,7 @@ from src.services_registry import (
     build_detected_writer,
     load_rotate_keys_config,
 )
-from src.ssh_keys import delete_ssh_key, generate_ssh_key
+from src.ssh_keys import delete_ssh_key, generate_ssh_key, get_ssh_key, test_ssh_connection
 
 logger = logging.getLogger("verificationrotation")
 
@@ -1073,6 +1073,8 @@ async def api_hosts(request: Request):
                 "user": r.user,
                 "search_dirs": json.loads(r.search_dirs) if r.search_dirs else [],
                 "db_refs": json.loads(r.db_refs) if r.db_refs else [],
+                "ssh_key_name": r.ssh_key_name,
+                "ssh_public_key": r.ssh_public_key,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
             }
             for r in rows
@@ -1141,6 +1143,61 @@ async def api_hosts_delete(request: Request, host_id: int):
         await session.delete(row)
         await session.commit()
     return {"success": True}
+
+
+@app.post("/api/hosts/{host_id}/generate-key")
+async def api_hosts_generate_key(request: Request, host_id: int):
+    """Generate an ed25519 key pair for this host and return the public key + setup script."""
+    require_auth(request)
+    async with async_session() as session:
+        result = await session.execute(select(RemoteHost).where(RemoteHost.id == host_id))
+        row = result.scalar_one_or_none()
+        if not row:
+            raise HTTPException(status_code=404, detail="Host not found")
+        host_addr = row.host
+        user = row.user
+        key_name = f"host-{host_id}"
+
+        # Regenerate — remove any existing key first
+        delete_ssh_key(key_name)
+        try:
+            pub_key, _ = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: generate_ssh_key(key_name)
+            )
+        except Exception as exc:
+            logger.exception("SSH key generation failed for host %s", host_id)
+            raise HTTPException(status_code=500, detail=f"Key generation failed: {exc}")
+
+        row.ssh_key_name = key_name
+        row.ssh_public_key = pub_key
+        await session.commit()
+
+    home = "/root" if user == "root" else f"/home/{user}"
+    setup_script = (
+        f"mkdir -p {home}/.ssh && chmod 700 {home}/.ssh\n"
+        f"echo '{pub_key}' >> {home}/.ssh/authorized_keys\n"
+        f"chmod 600 {home}/.ssh/authorized_keys"
+    )
+    return {"public_key": pub_key, "setup_script": setup_script, "host": host_addr, "user": user}
+
+
+@app.post("/api/hosts/{host_id}/test-connection")
+async def api_hosts_test_connection(request: Request, host_id: int):
+    """Test SSH connectivity to this host using its generated key."""
+    require_auth(request)
+    async with async_session() as session:
+        result = await session.execute(select(RemoteHost).where(RemoteHost.id == host_id))
+        row = result.scalar_one_or_none()
+        if not row:
+            raise HTTPException(status_code=404, detail="Host not found")
+        if not row.ssh_key_name:
+            raise HTTPException(status_code=400, detail="No SSH key generated — click 'Connect' first")
+        key_name, user, host_addr = row.ssh_key_name, row.user, row.host
+
+    ok, msg = await asyncio.get_running_loop().run_in_executor(
+        None, lambda: test_ssh_connection(key_name, user, host_addr)
+    )
+    return {"connected": ok, "message": msg}
 
 
 # ---------------------------------------------------------------------------

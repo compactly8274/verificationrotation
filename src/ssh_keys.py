@@ -1,9 +1,12 @@
 """SSH key pair generation and storage."""
 
+import logging
 import os
 import subprocess
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger("verificationrotation")
 
 from src.config import settings
 
@@ -38,6 +41,34 @@ def get_ssh_key(name: str) -> Optional[Path]:
     if private_path.exists():
         return private_path
     return None
+
+
+def test_ssh_connection(key_name: str, user: str, host: str) -> tuple[bool, str]:
+    """Test SSH connectivity using the named key. Returns (success, message)."""
+    key_path = get_ssh_key(key_name)
+    if not key_path:
+        return False, "SSH key file not found — re-generate the key"
+    try:
+        result = subprocess.run(
+            [
+                "ssh", "-i", str(key_path),
+                "-o", "BatchMode=yes",
+                "-o", "ConnectTimeout=10",
+                "-o", "StrictHostKeyChecking=accept-new",
+                f"{user}@{host}",
+                "echo verificationrotation-ok",
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0 and "verificationrotation-ok" in result.stdout:
+            return True, "Connection successful"
+        msg = result.stderr.strip() or f"SSH exited with code {result.returncode}"
+        return False, msg
+    except subprocess.TimeoutExpired:
+        return False, "Connection timed out (10 s)"
+    except Exception as exc:
+        logger.exception("SSH connection test failed for %s@%s", user, host)
+        return False, str(exc)
 
 
 def delete_ssh_key(name: str) -> bool:

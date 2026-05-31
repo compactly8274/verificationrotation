@@ -213,25 +213,90 @@ function renderHosts(hosts) {
     container.innerHTML = '<p>No remote hosts configured. Add one to scan it for secret references.</p>';
     return;
   }
-  let html = '<table><thead><tr><th>Label</th><th>Host</th><th>User</th><th>Search Dirs</th><th>Actions</th></tr></thead><tbody>';
+  let html = '<table><thead><tr><th>Label</th><th>Host</th><th>User</th><th>Search Dirs</th><th>SSH</th><th>Actions</th></tr></thead><tbody>';
   for (const h of hosts) {
     const sd = JSON.stringify(h.search_dirs).replace(/"/g, '&quot;');
     const dr = JSON.stringify(h.db_refs).replace(/"/g, '&quot;');
+    const hasKey = !!h.ssh_public_key;
+    const sshBadge = hasKey
+      ? `<span style="color:var(--pico-ins-color,#27ae60);font-size:.85rem">&#10003; Key set</span>`
+      : `<span style="color:var(--pico-muted-color);font-size:.85rem">No key</span>`;
     html += `
       <tr data-id="${Number(h.id)}" data-label="${esc(h.label)}" data-host="${esc(h.host)}" data-user="${esc(h.user)}" data-searchdirs="${sd}" data-dbrefs="${dr}">
         <td>${esc(h.label)}</td>
         <td>${esc(h.host)}</td>
         <td>${esc(h.user)}</td>
-        <td><code>${h.search_dirs.map(d => esc(d)).join(', ')}</code></td>
-        <td>
-          <button class="secondary outline" onclick="editHostFromRow(this.closest('tr'))">Edit</button>
-          <button class="secondary outline" onclick="deleteHost(${Number(h.id)})">Delete</button>
+        <td><code style="font-size:.8rem">${h.search_dirs.map(d => esc(d)).join(', ') || '—'}</code></td>
+        <td>${sshBadge}</td>
+        <td style="white-space:nowrap">
+          <button class="secondary outline" style="padding:.2rem .5rem;font-size:.8rem" onclick="editHostFromRow(this.closest('tr'))">Edit</button>
+          <button class="secondary outline" style="padding:.2rem .5rem;font-size:.8rem" onclick="connectHost(${Number(h.id)})">${hasKey ? 'Re-key' : 'Connect'}</button>
+          ${hasKey ? `<button class="secondary outline" style="padding:.2rem .5rem;font-size:.8rem" onclick="testHostConnection(${Number(h.id)}, this)">Test</button>` : ''}
+          <button class="contrast outline" style="padding:.2rem .5rem;font-size:.8rem" onclick="deleteHost(${Number(h.id)})">Delete</button>
         </td>
       </tr>
     `;
   }
   html += '</tbody></table>';
   container.innerHTML = html;
+}
+
+async function connectHost(id) {
+  const modal = document.getElementById('connect-modal');
+  const body = document.getElementById('connect-modal-body');
+  body.innerHTML = '<article aria-busy="true">Generating SSH key…</article>';
+  modal.showModal();
+  try {
+    const res = await csrfFetch(`/api/hosts/${id}/generate-key`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) {
+      body.innerHTML = `<p style="color:var(--pico-del-color,#c0392b)">Error: ${esc(data.detail || 'Key generation failed')}</p>`;
+      return;
+    }
+    body.innerHTML = `
+      <p>SSH key generated. Run this <strong>one-time script</strong> on <code>${esc(data.host)}</code> as <code>${esc(data.user)}</code>:</p>
+      <pre style="background:var(--pico-code-background);padding:1rem;border-radius:var(--pico-border-radius);overflow-x:auto;font-size:.8rem;white-space:pre-wrap;word-break:break-all">${esc(data.setup_script)}</pre>
+      <button class="secondary outline" onclick="navigator.clipboard.writeText(${JSON.stringify(data.setup_script)}).then(()=>this.textContent='Copied!').catch(()=>{})">Copy script</button>
+      <hr>
+      <p style="color:var(--pico-muted-color);font-size:.9rem">After running the script, click <strong>Test Connection</strong> to verify access.</p>
+      <button class="primary" onclick="testHostConnectionModal(${id})">Test Connection</button>
+      <span id="connect-test-result" style="margin-left:1rem"></span>
+    `;
+    loadHosts();
+  } catch (err) {
+    body.innerHTML = `<p style="color:var(--pico-del-color,#c0392b)">Network error: ${esc(String(err))}</p>`;
+  }
+}
+
+async function testHostConnection(id, btn) {
+  const orig = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '…';
+  try {
+    const res = await csrfFetch(`/api/hosts/${id}/test-connection`, { method: 'POST' });
+    const data = await res.json();
+    btn.textContent = data.connected ? '✓ OK' : '✗ Fail';
+    btn.style.color = data.connected ? 'var(--pico-ins-color,#27ae60)' : 'var(--pico-del-color,#c0392b)';
+    if (!data.connected) alert(`Connection failed:\n${data.message}`);
+    setTimeout(() => { btn.textContent = orig; btn.style.color = ''; btn.disabled = false; }, 3000);
+  } catch (err) {
+    btn.textContent = orig;
+    btn.disabled = false;
+    alert('Error: ' + err.message);
+  }
+}
+
+async function testHostConnectionModal(id) {
+  const result = document.getElementById('connect-test-result');
+  result.textContent = 'Testing…';
+  try {
+    const res = await csrfFetch(`/api/hosts/${id}/test-connection`, { method: 'POST' });
+    const data = await res.json();
+    result.style.color = data.connected ? 'var(--pico-ins-color,#27ae60)' : 'var(--pico-del-color,#c0392b)';
+    result.textContent = data.connected ? '✓ Connected!' : `✗ ${data.message}`;
+  } catch (err) {
+    result.textContent = 'Error: ' + err;
+  }
 }
 
 function openHostModal() {
