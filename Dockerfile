@@ -37,8 +37,9 @@ ENV PICO_VERSION=2.0.6
 RUN curl -fsSL "https://cdn.jsdelivr.net/npm/@picocss/pico@${PICO_VERSION}/css/pico.min.css" \
     -o src/static/pico.min.css
 
-# Create non-root user and ensure data directory is writable
-RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuser \
+# Create non-root user with fixed UID 1000 so host volume permissions are predictable.
+# On the host, run: chown -R 1000:1000 /mnt/user/appdata/verrot/data
+RUN groupadd -g 1000 appuser && useradd -u 1000 -g appuser -d /app -s /sbin/nologin appuser \
     && mkdir -p /app/data \
     && chown -R appuser:appuser /app/data /app/src /app/rotate_keys.yaml
 

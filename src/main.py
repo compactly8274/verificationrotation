@@ -155,10 +155,15 @@ def verify_password(password: str) -> bool:
             return _bcrypt.checkpw(password.encode(), stored.encode())
         except Exception:
             return False
-    # Plaintext passwords are no longer accepted — they expose the admin
-    # credential in environment variables and process listings.
-    logger.warning("ADMIN_PASSWORD is stored in plaintext — login rejected")
-    return False
+    # Plaintext fallback — still works but logs a warning on every login.
+    # Hash your password with bcrypt and update ADMIN_PASSWORD in .env to silence this.
+    logger.warning(
+        "ADMIN_PASSWORD is stored in plaintext. "
+        "Run: docker exec verificationrotation python3 -c \""
+        "import bcrypt; print(bcrypt.hashpw(b'YOUR_PASSWORD', bcrypt.gensalt(12)).decode())"
+        "\" to generate a hash, then update ADMIN_PASSWORD in your .env."
+    )
+    return hmac.compare_digest(password, stored)
 
 
 def verify_reset_key(key: str) -> bool:
