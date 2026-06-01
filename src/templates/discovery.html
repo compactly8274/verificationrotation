@@ -123,8 +123,13 @@ async function loadDetectedPaths() {
   const container = document.getElementById('detected-paths-container');
   try {
     const res = await fetch('/api/detected-service-paths');
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      container.innerHTML = `<p style="color:var(--pico-del-color,#c0392b)">Error loading detected paths: ${escHtml(data.detail || res.statusText)}</p>`;
+      return;
+    }
     const paths = await res.json();
-    if (!paths.length) {
+    if (!Array.isArray(paths) || !paths.length) {
       container.innerHTML = '<p style="color:var(--pico-muted-color)">No detected service paths yet. Click <strong>Detect Now</strong> to scan.</p>';
       return;
     }
@@ -192,8 +197,13 @@ async function loadDiscoveredKeys() {
   container.innerHTML = '<article aria-busy="true"></article>';
   try {
     const res = await fetch('/api/discovered-keys');
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      container.innerHTML = `<p style="color:var(--pico-del-color,#c0392b)">Error loading discovered keys: ${escHtml(data.detail || res.statusText)}</p>`;
+      return;
+    }
     const keys = await res.json();
-    if (!keys.length) {
+    if (!Array.isArray(keys) || !keys.length) {
       container.innerHTML = '<p style="color:var(--pico-muted-color)">No discovered keys in cache. Run a scan to populate.</p>';
       return;
     }

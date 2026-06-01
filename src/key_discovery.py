@@ -21,6 +21,7 @@ _ENV_FILENAMES = {".env", "env", ".env.local", ".env.prod", ".env.production", "
 _COMPOSE_NAMES = {"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}
 _STRUCTURED_EXTS = {".json", ".yaml", ".yml", ".toml", ".ini", ".conf", ".cfg"}
 _MAX_FILE_BYTES = 2 * 1024 * 1024  # 2 MB
+_MAX_DEPTH = 6
 
 
 @dataclass
@@ -170,9 +171,14 @@ def discover_keys(
         if not base_path.exists():
             continue
 
-        for root_str, dirs, files in os.walk(base_path):
-            dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
+        base_depth = len(base_path.parts)
+        for root_str, dirs, files in os.walk(base_path, followlinks=False):
             root = Path(root_str)
+            depth = len(root.parts) - base_depth
+            if depth >= _MAX_DEPTH:
+                dirs[:] = []
+                continue
+            dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
 
             for fname in files:
                 if not remaining:

@@ -1333,7 +1333,10 @@ async def api_detect_service_paths(request: Request):
             if d.strip()
         ]
         loop = asyncio.get_running_loop()
-        detected = await loop.run_in_executor(None, lambda: detect_service_paths(search_dirs))
+        detected = await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: detect_service_paths(search_dirs)),
+            timeout=settings.scan_timeout_minutes * 60,
+        )
 
         results = []
         async with async_session() as session:
@@ -1356,6 +1359,9 @@ async def api_detect_service_paths(request: Request):
             r["display_name"] = name_map.get(r["service_id"], r["service_id"])
 
         return {"detected": len(results), "results": results}
+    except asyncio.TimeoutError:
+        logger.error("detect-service-paths timed out after %d minutes", settings.scan_timeout_minutes)
+        raise HTTPException(status_code=504, detail=f"Detection timed out after {settings.scan_timeout_minutes} minutes. Try narrowing DISCOVERY_SEARCH_DIRS.")
     except Exception as exc:
         logger.exception("detect-service-paths failed")
         raise HTTPException(status_code=500, detail=str(exc))
@@ -1434,10 +1440,17 @@ async def api_discover_keys(
     _, _, _, _, services = load_rotate_keys_config(settings.descriptions_path)
     env = read_env(settings.env_file)
 
-    results = await asyncio.get_running_loop().run_in_executor(
-        None,
-        lambda: discover_keys(services, env, dir_list, skip_set),
-    )
+    try:
+        results = await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: discover_keys(services, env, dir_list, skip_set),
+            ),
+            timeout=settings.scan_timeout_minutes * 60,
+        )
+    except asyncio.TimeoutError:
+        logger.error("discover-keys timed out after %d minutes", settings.scan_timeout_minutes)
+        raise HTTPException(status_code=504, detail=f"Scan timed out after {settings.scan_timeout_minutes} minutes. Try narrowing DISCOVERY_SEARCH_DIRS.")
 
     stored = []
     async with async_session() as session:
