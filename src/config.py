@@ -59,8 +59,9 @@ class Settings(BaseSettings):
     # Docker
     docker_socket: Path = Field(default=Path("/var/run/docker.sock"), alias="DOCKER_SOCKET")
 
-    # Security
-    cookie_https_only: bool = Field(default=True, alias="COOKIE_HTTPS_ONLY")
+    # Security — default False so plain HTTP homelab installs work out of the box.
+    # Set COOKIE_HTTPS_ONLY=true if you serve over HTTPS.
+    cookie_https_only: bool = Field(default=False, alias="COOKIE_HTTPS_ONLY")
     health_check_skip_ssl: bool = Field(default=False, alias="HEALTH_CHECK_SKIP_SSL")
 
     # Key Discovery
@@ -83,6 +84,15 @@ if _readable_env_file is None and _env_file.exists():
         ".env file exists but is not readable (permission denied). "
         "Configuration will be loaded from environment variables only. "
         "Fix with: chmod 644 .env"
+    )
+
+# Log auth config state so startup logs confirm what's loaded
+if settings.admin_password:
+    logger.info("ADMIN_PASSWORD loaded (%d chars)", len(settings.admin_password))
+else:
+    logger.warning(
+        "ADMIN_PASSWORD is not set — all login attempts will be rejected. "
+        "Set ADMIN_PASSWORD in your .env file or via the env_file: directive."
     )
 
 # Crash on startup if the secret key is still the default.

@@ -146,7 +146,8 @@ async def _apply_detections(services: dict) -> dict:
 def verify_password(password: str) -> bool:
     if not settings.admin_password:
         return False
-    stored = settings.admin_password
+    # Strip whitespace/CRLF that may be introduced by some env_file parsers
+    stored = settings.admin_password.strip()
     # Support bcrypt-hashed passwords ($2b$ / $2a$ prefix)
     if stored.startswith("$2b$") or stored.startswith("$2a$"):
         import bcrypt as _bcrypt
