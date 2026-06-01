@@ -32,6 +32,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src/ ./src/
 COPY rotate_keys.yaml .
 
+# Bundle PicoCSS locally so the app works without CDN access
+ENV PICO_VERSION=2.0.6
+RUN curl -fsSL "https://cdn.jsdelivr.net/npm/@picocss/pico@${PICO_VERSION}/css/pico.min.css" \
+    -o src/static/pico.min.css
+
 # Create non-root user and ensure data directory is writable
 RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuser \
     && mkdir -p /app/data \
