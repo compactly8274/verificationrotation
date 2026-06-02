@@ -279,6 +279,14 @@ limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    """Return JSON for all unhandled exceptions so res.json() never throws in the browser."""
+    logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
+    return JSONResponse({"detail": "Internal server error"}, status_code=500)
+
+app.add_exception_handler(Exception, _unhandled_exception_handler)
+
 # CSRF token signing — uses the same secret key
 _csrf_signer = URLSafeTimedSerializer(settings.secret_key, salt="csrf")
 
