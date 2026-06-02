@@ -5,6 +5,7 @@ Discovery is attempted in order of confidence:
   2. env_file     — finds .env / *.env files in search_dirs containing the env var
   3. compose      — finds docker-compose.yml files declaring the env var
   4. structured   — parses JSON / YAML / TOML / INI files for a key matching the env var name
+  5. remote_config — SSH scan of a remote host's config files
 """
 
 import json
@@ -32,7 +33,7 @@ class DiscoveryResult:
     value: str          # plaintext — caller is responsible for encrypting before storage
     source_file: str
     confidence: str     # "high" | "medium" | "low"
-    strategy: str       # "auto_fetch" | "env_file" | "compose" | "structured"
+    strategy: str       # "auto_fetch" | "env_file" | "compose" | "structured" | "remote_config"
 
 
 # ---------------------------------------------------------------------------
@@ -44,11 +45,11 @@ def _extract_from_text(text: str, env_var: str) -> Optional[str]:
     esc = re.escape(env_var)
     patterns = [
         # KEY=value  /  KEY="value"  (shell, .env, inline docker-compose)
-        rf'(?m)^[ \t]*{esc}[ \t]*=[ \t]*["\']?([^\s"\'#\n][^\s"\'#\n]*)',
+        rf'(?m)^[ \t]*{esc}[ \t]*=[ \t]*["\']?([^\s"\'\'#\n][^\s"\'\'#\n]*)',
         # - KEY=value  (docker-compose env list item)
-        rf'(?m)^[ \t]*-[ \t]*{esc}=[ \t]*["\']?([^\s"\'#\n]+)',
+        rf'(?m)^[ \t]*-[ \t]*{esc}=[ \t]*["\']?([^\s"\'\'#\n]+)',
         # KEY: value  (YAML block)
-        rf'(?m)^[ \t]*{esc}[ \t]*:[ \t]*["\']?([^\s"\'#\n][^\s"\'#\n]*)',
+        rf'(?m)^[ \t]*{esc}[ \t]*:[ \t]*["\']?([^\s"\'\'#\n][^\s"\'\'#\n]*)',
         # "KEY": "value"  (JSON / YAML inline)
         rf'["\']?{esc}["\']?\s*:\s*["\']([^"\']+)["\']',
     ]
@@ -109,7 +110,7 @@ def _parse_structured(fp: Path) -> Optional[object]:
 
 
 # ---------------------------------------------------------------------------
-# Main entry point
+# Main entry points
 # ---------------------------------------------------------------------------
 
 def discover_keys(
@@ -127,7 +128,7 @@ def discover_keys(
     results: list[DiscoveryResult] = []
     found_ids: set[str] = set()
 
-    # ── Strategy 1: auto_fetch ──────────────────────────────────────────────
+    # ── Strategy 1: auto_fetch ──────────────────────────────────────────────────────────────────────
     for sid, svc in services.items():
         if not svc.env_var or not svc.auto_fetch:
             continue
@@ -165,7 +166,7 @@ def discover_keys(
     if not remaining:
         return results
 
-    # ── Strategies 2–4: filesystem scan ────────────────────────────────────
+    # ── Strategies 2–4: filesystem scan ────────────────────────────────────────────────────────────────
     for base in search_dirs:
         base_path = Path(base)
         if not base_path.exists():
@@ -223,5 +224,47 @@ def discover_keys(
 
                 for k in to_remove:
                     remaining.pop(k, None)
+
+    return results
+
+
+def discover_remote_keys(
+    host: str,
+    user: str,
+    services: dict,
+    env: dict[str, str],
+    search_dirs: list[str],
+    key_path: Optional[str] = None,
+) -> list[DiscoveryResult]:
+    """Scan a remote host for service API keys via SSH.
+
+    Returns DiscoveryResult entries for services where the remote config value
+    differs from what's currently in env.
+    """
+    from src.path_discovery import scan_remote_service_configs
+
+    remote_data = scan_remote_service_configs(host, user, search_dirs, key_path)
+    results: list[DiscoveryResult] = []
+
+    for sid, data in remote_data.items():
+        value = data.get("value")
+        if not value or len(value) < 8:
+            continue
+        svc = services.get(sid)
+        if svc is None:
+            continue
+        if not svc.env_var:
+            continue
+        if value == env.get(svc.env_var, ""):
+            continue
+        results.append(DiscoveryResult(
+            service_id=sid,
+            env_var=svc.env_var,
+            display_name=svc.display_name,
+            value=value,
+            source_file=data.get("path", "remote"),
+            confidence="high",
+            strategy="remote_config",
+        ))
 
     return results
