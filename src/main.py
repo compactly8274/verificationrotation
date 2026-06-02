@@ -302,14 +302,17 @@ async def csrf_middleware(request: Request, call_next):
         # Exempt login endpoints (no session yet)
         if path in _CSRF_EXEMPT:
             return await call_next(request)
+        # Use scope directly — BaseHTTPMiddleware can receive the scope before
+        # SessionMiddleware injects "session", so request.session would raise.
+        session_data = request.scope.get("session", {})
         # Allow unauthenticated paths through — require_auth handles them
-        if not request.session.get("authenticated"):
+        if not session_data.get("authenticated"):
             return await call_next(request)
         # Authenticated mutating request — require CSRF
         token = request.headers.get("x-csrf-token", "")
         if not token:
             return JSONResponse({"detail": "Missing CSRF token"}, status_code=403)
-        session_id = request.session.get("id", "")
+        session_id = session_data.get("id", "")
         try:
             data = _csrf_signer.loads(token, max_age=3600)
             if data != session_id:
