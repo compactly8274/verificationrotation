@@ -355,6 +355,7 @@ def _db_host_to_dict(row: RemoteHost) -> dict:
         "user": row.user,
         "search_dirs": json.loads(row.search_dirs) if row.search_dirs else [],
         "db_refs": [tuple(r) for r in json.loads(row.db_refs)] if row.db_refs else [],
+        "key_path": get_ssh_key(row.ssh_key_name) if row.ssh_key_name else None,
     }
 
 
