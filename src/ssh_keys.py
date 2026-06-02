@@ -48,6 +48,7 @@ def test_ssh_connection(key_name: str, user: str, host: str) -> tuple[bool, str]
     key_path = get_ssh_key(key_name)
     if not key_path:
         return False, "SSH key file not found — re-generate the key"
+    known_hosts = str(settings.data_dir / "known_hosts")
     try:
         result = subprocess.run(
             [
@@ -55,6 +56,7 @@ def test_ssh_connection(key_name: str, user: str, host: str) -> tuple[bool, str]
                 "-o", "BatchMode=yes",
                 "-o", "ConnectTimeout=10",
                 "-o", "StrictHostKeyChecking=accept-new",
+                "-o", f"UserKnownHostsFile={known_hosts}",
                 f"{user}@{host}",
                 "echo verificationrotation-ok",
             ],
