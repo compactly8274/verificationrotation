@@ -9,16 +9,13 @@ For each service:
   4. Replaces old → new in every text config file found
   5. Replaces old → new in every SQLite JSON blob found
   6. Updates your .env file
-  7. Optionally syncs rotated passwords to Bitwarden (--sync-bitwarden)
 
 Run directly on Unraid (needs access to /mnt/user/appdata):
     python3 rotate_keys.py
     python3 rotate_keys.py --service prowlarr
     python3 rotate_keys.py --env /path/to/.env
-    python3 rotate_keys.py --passwords-only --generate-passwords --sync-bitwarden
-
-Bitwarden sync requires the BW_SESSION env var or --bw-session.
-Install the CLI:  npm install -g @bitwarden/cli
+    python3 rotate_keys.py --auto-discover          # auto-detect config paths & keys
+    python3 rotate_keys.py --auto-discover --auto-write  # also write keys to config files
 """
 
 import argparse
@@ -27,11 +24,9 @@ import itertools
 import json
 import os
 import re
-import secrets
 import shlex
 import shutil
 import sqlite3
-import string
 import subprocess
 import sys
 import threading
@@ -47,6 +42,18 @@ except ImportError:
     yaml = None  # type: ignore
 
 # ---------------------------------------------------------------------------
+# Optional auto-discover modules (src/ package)
+# ---------------------------------------------------------------------------
+
+try:
+    from src.path_discovery import detect_service_paths, scan_remote_service_configs
+    from src.key_discovery import discover_keys, discover_remote_keys, DiscoveryResult
+    from src.app_signatures import APP_SIGNATURES
+    _AUTO_DISCOVER_AVAILABLE = True
+except ImportError:
+    _AUTO_DISCOVER_AVAILABLE = False
+
+# ---------------------------------------------------------------------------
 # Service definition
 # ---------------------------------------------------------------------------
 
@@ -57,6 +64,8 @@ class ServiceDef:
     settings_url: str
     # Called after user says they've rotated — returns new key or None
     auto_fetch: Optional[Callable[[], Optional[str]]] = None
+    # Called to write a new key into the service's config file
+    auto_write: Optional[Callable[[str], bool]] = None
     # SQLite (db_path, table, column) tuples that may store this key
     db_refs: list = field(default_factory=list)
     note: str = ""
@@ -64,8 +73,6 @@ class ServiceDef:
     health_url: str = ""
     # Docker container name to restart after key rotation
     docker_name: str = ""
-    # Bitwarden sync config: {"item_name": "...", "uri": "...", "field": "password"}
-    bitwarden: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +94,7 @@ _DEFAULT_SKIP_DIRS = {
 _DEFAULT_REMOTE_HOSTS = [
     {
         "label": "TrueNAS",
-        "host": "",
+        "host": "192.168.1.122",
         "user": "root",
         "search_dirs": ["/mnt/Data/appdata"],
         "db_refs": [
@@ -129,6 +136,25 @@ def _arr_xml(path: str) -> Callable[[], Optional[str]]:
     return _read
 
 
+def _arr_xml_write(path: str) -> Callable[[str], bool]:
+    """Replace <ApiKey>…</ApiKey> in-place using regex to preserve formatting."""
+    _pat = re.compile(r'(<ApiKey>)[^<]*(</ApiKey>)')
+    def _write(new_key: str) -> bool:
+        try:
+            fp = Path(path)
+            if fp.is_symlink():
+                return False
+            text = fp.read_text()
+            updated = _pat.sub(rf'\g<1>{new_key}\g<2>', text)
+            if updated == text:
+                return False
+            fp.write_text(updated)
+            return True
+        except Exception:
+            return False
+    return _write
+
+
 def _xml_tag(path: str, tag: str) -> Callable[[], Optional[str]]:
     def _read() -> Optional[str]:
         try:
@@ -140,252 +166,92 @@ def _xml_tag(path: str, tag: str) -> Callable[[], Optional[str]]:
     return _read
 
 
-# ---------------------------------------------------------------------------
-# Bitwarden sync
-# ---------------------------------------------------------------------------
-
-def bw_available() -> bool:
-    """Return True if the Bitwarden CLI (bw) is installed."""
-    try:
-        subprocess.run(["bw", "--version"], capture_output=True, check=True)
-        return True
-    except Exception:
-        return False
-
-
-def bw_get_session() -> Optional[str]:
-    """Return an active BW_SESSION string, or None."""
-    session = os.environ.get("BW_SESSION", "").strip()
-    if session:
-        # Validate it works
+def _xml_tag_write(path: str, tag: str) -> Callable[[str], bool]:
+    """Replace a named XML tag value in-place using regex to preserve formatting."""
+    def _write(new_key: str) -> bool:
         try:
-            subprocess.run(
-                ["bw", "sync", "--session", session],
-                capture_output=True, check=True, timeout=30,
-            )
-            return session
+            fp = Path(path)
+            if fp.is_symlink():
+                return False
+            text = fp.read_text()
+            pat = re.compile(rf'(<{re.escape(tag)}>)[^<]*(</{re.escape(tag)}>)')
+            updated = pat.sub(rf'\g<1>{new_key}\g<2>', text)
+            if updated == text:
+                return False
+            fp.write_text(updated)
+            return True
         except Exception:
-            pass
-    return None
-
-
-def bw_unlock(master_password: str) -> Optional[str]:
-    """Unlock the vault and return the session key.
-
-    Password is passed via stdin to avoid exposing it in /proc/cmdline.
-    """
-    try:
-        result = subprocess.run(
-            ["bw", "unlock", "--raw"],
-            input=master_password,
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception:
-        pass
-    return None
-
-
-def bw_search_item(session: str, item_name: Optional[str] = None, uri: Optional[str] = None) -> Optional[dict]:
-    """Find a single Bitwarden item by name or URI. Returns the item dict or None."""
-    search_term = item_name or uri
-    if not search_term:
-        return None
-    try:
-        result = subprocess.run(
-            ["bw", "list", "items", "--search", search_term, "--session", session],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode != 0:
-            return None
-        items = json.loads(result.stdout)
-        if not items:
-            return None
-        # If URI was given, filter by matching login.uris
-        if uri:
-            for item in items:
-                login = item.get("login", {})
-                uris = login.get("uris", [])
-                for u in uris:
-                    if uri in (u.get("uri", "") or ""):
-                        return item
-            # Fallback: return first item if no URI match
-        return items[0]
-    except Exception:
-        return None
-
-
-def bw_update_password(session: str, item_id: str, new_password: str, field: str = "password") -> bool:
-    """Update a password field in a Bitwarden item and save it."""
-    try:
-        # Fetch current item
-        result = subprocess.run(
-            ["bw", "get", "item", item_id, "--session", session],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode != 0:
             return False
-        item = json.loads(result.stdout)
-        if field == "password":
-            item.setdefault("login", {})["password"] = new_password
-        else:
-            # Custom field
-            fields = item.get("fields", [])
-            for f in fields:
-                if f.get("name") == field:
-                    f["value"] = new_password
-                    break
-            else:
-                fields.append({"name": field, "value": new_password, "type": 0})
-            item["fields"] = fields
-        # Encode and save
-        encoded = subprocess.run(
-            ["bw", "encode"],
-            input=json.dumps(item), capture_output=True, text=True, timeout=30,
-        )
-        if encoded.returncode != 0:
-            return False
-        save_result = subprocess.run(
-            ["bw", "edit", "item", item_id, encoded.stdout.strip(), "--session", session],
-            capture_output=True, text=True, timeout=30,
-        )
-        return save_result.returncode == 0
-    except Exception:
-        return False
-
-
-def sync_bitwarden(svc: ServiceDef, new_password: str, session: str) -> tuple[bool, str]:
-    """Sync a rotated password back to Bitwarden. Returns (success, message)."""
-    cfg = svc.bitwarden
-    if not cfg:
-        return False, "No bitwarden config for this service"
-    item_name = cfg.get("item_name", "")
-    uri = cfg.get("uri", "")
-    field = cfg.get("field", "password")
-    item = bw_search_item(session, item_name=item_name or None, uri=uri or None)
-    if not item:
-        return False, f"Bitwarden item not found (searched: {item_name or uri})"
-    ok = bw_update_password(session, item["id"], new_password, field=field)
-    if ok:
-        return True, f"Updated Bitwarden item '{item.get('name', item['id'])}'"
-    return False, "Bitwarden edit command failed"
+    return _write
 
 
 _DEFAULT_SERVICES: dict[str, ServiceDef] = {
     "sonarr": ServiceDef(
         display_name="Sonarr", env_var="SONARR_API_KEY",
-        settings_url="",
+        settings_url="http://192.168.1.104:8989/settings/general",
         auto_fetch=_arr_xml("/mnt/user/appdata/sonarr/config.xml"),
+        auto_write=_arr_xml_write("/mnt/user/appdata/sonarr/config.xml"),
         db_refs=_DB_REF_GROUPS["prowlarr_apps"],
     ),
     "radarr": ServiceDef(
         display_name="Radarr", env_var="RADARR_API_KEY",
-        settings_url="",
+        settings_url="http://192.168.1.104:7878/settings/general",
         auto_fetch=_arr_xml("/mnt/user/appdata/radarr/config.xml"),
+        auto_write=_arr_xml_write("/mnt/user/appdata/radarr/config.xml"),
         db_refs=_DB_REF_GROUPS["prowlarr_apps"],
     ),
     "lidarr": ServiceDef(
         display_name="Lidarr", env_var="LIDARR_API_KEY",
-        settings_url="",
+        settings_url="http://192.168.1.104:8686/settings/general",
         auto_fetch=_arr_xml("/mnt/user/appdata/lidarr/config.xml"),
+        auto_write=_arr_xml_write("/mnt/user/appdata/lidarr/config.xml"),
         db_refs=_DB_REF_GROUPS["prowlarr_apps"],
     ),
     "readarr": ServiceDef(
         display_name="Readarr", env_var="READARR_API_KEY",
-        settings_url="",
+        settings_url="http://192.168.1.104:8787/settings/general",
         auto_fetch=_arr_xml("/mnt/user/appdata/readarr/config.xml"),
+        auto_write=_arr_xml_write("/mnt/user/appdata/readarr/config.xml"),
         db_refs=_DB_REF_GROUPS["prowlarr_apps"],
     ),
     "prowlarr": ServiceDef(
         display_name="Prowlarr", env_var="PROWLARR_API_KEY",
-        settings_url="",
+        settings_url="http://192.168.1.122:9696/settings/general",
         auto_fetch=_arr_xml("/mnt/user/appdata/prowlarr/config.xml"),
+        auto_write=_arr_xml_write("/mnt/user/appdata/prowlarr/config.xml"),
         db_refs=_DB_REF_GROUPS["arr_indexer"],
         note="After rotating, each *arr app needs its Prowlarr indexer updated — this script handles it automatically via the SQLite DB.",
     ),
-    "overseerr": ServiceDef(display_name="Overseerr", env_var="OVERSEERR_API_KEY", settings_url=""),
-    "bazarr": ServiceDef(display_name="Bazarr", env_var="BAZARR_API_KEY", settings_url=""),
-    "jackett": ServiceDef(display_name="Jackett", env_var="JACKETT_API_KEY", settings_url="", db_refs=_DB_REF_GROUPS["arr_indexer"]),
-    "autobrr": ServiceDef(display_name="Autobrr", env_var="AUTOBRR_API_KEY", settings_url=""),
-    "slskd": ServiceDef(display_name="Slskd", env_var="SLSKD_API_KEY", settings_url=""),
+    "overseerr": ServiceDef(display_name="Overseerr", env_var="OVERSEERR_API_KEY", settings_url="http://192.168.1.104:5055/settings"),
+    "bazarr": ServiceDef(display_name="Bazarr", env_var="BAZARR_API_KEY", settings_url="http://192.168.1.104:6767/settings/general"),
+    "jackett": ServiceDef(display_name="Jackett", env_var="JACKETT_API_KEY", settings_url="http://192.168.1.122:9117/UI/Dashboard", db_refs=_DB_REF_GROUPS["arr_indexer"]),
+    "autobrr": ServiceDef(display_name="Autobrr", env_var="AUTOBRR_API_KEY", settings_url="http://192.168.1.104:7474/settings/api"),
+    "slskd": ServiceDef(display_name="Slskd", env_var="SLSKD_API_KEY", settings_url="http://192.168.1.104:5035/settings"),
     "plex": ServiceDef(display_name="Plex", env_var="PLEX_TOKEN", settings_url="https://app.plex.tv/desktop/#!/settings/account",
                         note="Plex tokens are personal account tokens. Low priority — skip unless you believe it was actually used maliciously."),
-    "tautulli": ServiceDef(display_name="Tautulli", env_var="TAUTULLI_API_KEY", settings_url=""),
-    "sabnzbd": ServiceDef(display_name="SABnzbd", env_var="SABNZBD_API_KEY", settings_url="", db_refs=_DB_REF_GROUPS["arr_dlclient"]),
-    "qbittorrent": ServiceDef(display_name="qBittorrent password", env_var="QBITTORRENT_PASSWORD", settings_url="",
-                               db_refs=_DB_REF_GROUPS["arr_dlclient"], note="Change password in qBittorrent WebUI Options > Web UI > Password.",
-                               bitwarden={"item_name": "qBittorrent Web UI"}),
-    "npm": ServiceDef(display_name="Nginx Proxy Manager  ← DO THIS FIRST (public VPS)", env_var="NPM_PASSWORD", settings_url="",
-                      note="This is internet-facing. Highest priority.",
-                      bitwarden={"item_name": "Nginx Proxy Manager"}),
-    "pangolin": ServiceDef(display_name="Pangolin", env_var="PANGOLIN_API_KEY", settings_url=""),
-    "miniflux": ServiceDef(display_name="Miniflux", env_var="MINIFLUX_API_KEY", settings_url=""),
-    "traefik": ServiceDef(display_name="Traefik", env_var="", settings_url="", note="No secret key to rotate."),
+    "tautulli": ServiceDef(display_name="Tautulli", env_var="TAUTULLI_API_KEY", settings_url="http://192.168.1.104:8189/settings"),
+    "sabnzbd": ServiceDef(display_name="SABnzbd", env_var="SABNZBD_API_KEY", settings_url="http://192.168.1.122:10097/sabnzbd/config/general/", db_refs=_DB_REF_GROUPS["arr_dlclient"]),
+    "qbittorrent": ServiceDef(display_name="qBittorrent password", env_var="QBITTORRENT_PASSWORD", settings_url="http://192.168.1.122:10095/",
+                               db_refs=_DB_REF_GROUPS["arr_dlclient"], note="Change password in qBittorrent WebUI Options > Web UI > Password."),
+    "npm": ServiceDef(display_name="Nginx Proxy Manager  ← DO THIS FIRST (public VPS)", env_var="NPM_PASSWORD", settings_url="http://172.245.73.170:81",
+                      note="This is internet-facing. Highest priority."),
+    "pangolin": ServiceDef(display_name="Pangolin", env_var="PANGOLIN_API_KEY", settings_url="https://pancakefarts.site/admin/api-keys"),
+    "miniflux": ServiceDef(display_name="Miniflux", env_var="MINIFLUX_API_KEY", settings_url="https://mini.pancakefarts.xyz/keys"),
+    "traefik": ServiceDef(display_name="Traefik", env_var="", settings_url="https://traefik.pancakefarts.site", note="No secret key to rotate."),
     "gluetun_unraid": ServiceDef(display_name="Gluetun (Unraid)", env_var="GLUETUN_UNRAID_API_KEY", settings_url="",
                                   note="Edit HTTP_CONTROL_SERVER_API_KEY in the Gluetun container's env vars, then restart."),
     "gluetun_truenas": ServiceDef(display_name="Gluetun (TrueNAS)", env_var="GLUETUN_TRUENAS_API_KEY", settings_url="",
                                    note="Edit HTTP_CONTROL_SERVER_API_KEY in the Gluetun container's env vars, then restart."),
-    "homebridge": ServiceDef(display_name="Homebridge password", env_var="HOMEBRIDGE_PASSWORD", settings_url="",
-                             note="Change under User Accounts in Homebridge settings.",
-                             bitwarden={"item_name": "Homebridge"}),
-    "immich": ServiceDef(display_name="Immich", env_var="IMMICH_API_KEY", settings_url=""),
-    "truenas": ServiceDef(display_name="TrueNAS", env_var="TRUENAS_API_KEY", settings_url="",
+    "homebridge": ServiceDef(display_name="Homebridge password", env_var="HOMEBRIDGE_PASSWORD", settings_url="http://192.168.1.104:8581",
+                             note="Change under User Accounts in Homebridge settings."),
+    "immich": ServiceDef(display_name="Immich", env_var="IMMICH_API_KEY", settings_url="http://192.168.1.104:2283/user-settings?isOpen=api-keys"),
+    "truenas": ServiceDef(display_name="TrueNAS", env_var="TRUENAS_API_KEY", settings_url="http://192.168.1.122/ui/apikeys",
                             note="Delete the old key and create a new one."),
-    "unifi_os": ServiceDef(display_name="UniFi OS", env_var="UNIFI_OS_API_KEY", settings_url=""),
-    "unifi_ucg": ServiceDef(display_name="UniFi UCG", env_var="UNIFI_UCG_API_KEY", settings_url=""),
-    "qnap": ServiceDef(display_name="QNAP password", env_var="QNAP_PASSWORD", settings_url="",
-                        bitwarden={"item_name": "QNAP NAS"}),
+    "unifi_os": ServiceDef(display_name="UniFi OS", env_var="UNIFI_OS_API_KEY", settings_url="https://192.168.1.89:11443/proxy/network/integrations"),
+    "unifi_ucg": ServiceDef(display_name="UniFi UCG", env_var="UNIFI_UCG_API_KEY", settings_url="https://192.168.1.1/proxy/network/integrations"),
+    "qnap": ServiceDef(display_name="QNAP password", env_var="QNAP_PASSWORD", settings_url="https://192.168.1.168"),
     "nut": ServiceDef(display_name="NUT/Peanut password", env_var="NUT_PASSWORD", settings_url="",
-                       note="Update in the NUT server config and in all services that reference it.",
-                       bitwarden={"item_name": "NUT Server"}),
-    "whisparr": ServiceDef(display_name="Whisparr", env_var="WHISPARR_API_KEY",
-                            settings_url="",
-                            auto_fetch=_arr_xml("/mnt/user/appdata/whisparr/config.xml")),
-    "jellyfin": ServiceDef(display_name="Jellyfin", env_var="JELLYFIN_API_KEY",
-                            settings_url="",
-                            note="API keys are under Dashboard > Advanced > API Keys."),
-    "emby": ServiceDef(display_name="Emby", env_var="EMBY_API_KEY", settings_url="",
-                        note="API keys are under Server > Advanced > API Keys. Verify the host:port in your setup."),
-    "jellyseerr": ServiceDef(display_name="Jellyseerr", env_var="JELLYSEERR_API_KEY", settings_url="",
-                              note="API keys are under Settings > Jellyseerr. Verify the host:port in your setup."),
-    "navidrome": ServiceDef(display_name="Navidrome", env_var="NAVIDROME_TOKEN",
-                             settings_url="",
-                             note="Also set NAVIDROME_USER. Create a new token in Profile > Change Password > Tokens."),
-    "audiobookshelf": ServiceDef(display_name="Audiobookshelf", env_var="AUDIOBOOKSHELF_API_KEY",
-                                   settings_url="",
-                                   note="Create API tokens under Settings > Users > (user) > API Tokens."),
-    "deluge": ServiceDef(display_name="Deluge", env_var="DELUGE_PASSWORD", settings_url="",
-                          db_refs=_DB_REF_GROUPS["arr_dlclient"],
-                          note="Change WebUI password in Preferences > Interface. Verify the host:port in your setup.",
-                          bitwarden={"item_name": "Deluge Web UI"}),
-    "transmission": ServiceDef(display_name="Transmission", env_var="TRANSMISSION_PASSWORD", settings_url="",
-                                db_refs=_DB_REF_GROUPS["arr_dlclient"],
-                                note="Also set TRANSMISSION_USERNAME. Change RPC password in settings.json or via the Web UI. Verify the host:port in your setup.",
-                                bitwarden={"item_name": "Transmission Web UI"}),
-    "komga": ServiceDef(display_name="Komga", env_var="KOMGA_PASSWORD", settings_url="",
-                         note="Also set KOMGA_USERNAME. Change password in Server Settings > Authentication. Verify the host:port in your setup.",
-                         bitwarden={"item_name": "Komga"}),
-    "kavita": ServiceDef(display_name="Kavita", env_var="KAVITA_API_KEY", settings_url="",
-                          note="API keys are under User Dashboard > 3rd Party Clients. Verify the host:port in your setup."),
-    "mylar": ServiceDef(display_name="Mylar", env_var="MYLAR_API_KEY", settings_url="",
-                         note="API key is under Configuration > Web Interface. Verify the host:port in your setup."),
-    "nextcloud": ServiceDef(display_name="Nextcloud", env_var="NEXTCLOUD_PASSWORD", settings_url="",
-                             note="Also set NEXTCLOUD_USERNAME. Change password via User Settings > Security. Verify the host:port in your setup.",
-                             bitwarden={"item_name": "Nextcloud"}),
-    "syncthing": ServiceDef(display_name="Syncthing", env_var="SYNCTHING_API_KEY",
-                             settings_url="",
-                             auto_fetch=_xml_tag("/mnt/user/appdata/syncthing/config.xml", "apikey"),
-                             note="API key is in Settings > GUI."),
-    "adguard": ServiceDef(display_name="AdGuard Home", env_var="ADGUARD_PASSWORD", settings_url="",
-                            note="Also set ADGUARD_USERNAME. Change password in Settings > General Settings > Web interface. Verify the host:port in your setup.",
-                            bitwarden={"item_name": "AdGuard Home"}),
-    "pihole": ServiceDef(display_name="Pi-hole", env_var="PIHOLE_API_KEY", settings_url="",
-                          note="API token is under Settings > API > Show API token. Verify the host:port in your setup."),
-    "portainer": ServiceDef(display_name="Portainer", env_var="PORTAINER_API_KEY", settings_url="",
-                             note="Also set PORTAINER_ENV. Create API keys under My Account > API keys. Verify the host:port in your setup."),
-    "uptimekuma": ServiceDef(display_name="Uptime Kuma", env_var="UPTIMEKUMA_API_KEY", settings_url="",
-                               note="Also set UPTIMEKUMA_SLUG. API keys are under Settings > API Keys. Verify the host:port in your setup."),
+                       note="Update in the NUT server config and in all services that reference it."),
 }
 
 
@@ -409,11 +275,160 @@ def _build_auto_fetch(cfg: Optional[dict]) -> Optional[Callable[[], Optional[str
         return _arr_xml(path)
     if t == "xml_tag":
         return _xml_tag(path, cfg.get("tag", "ApiKey"))
+    if t == "ini":
+        section, key = cfg.get("section", ""), cfg.get("key", "")
+        try:
+            from src.config_io import read_ini
+            return lambda: read_ini(path, section, key)
+        except ImportError:
+            return None
+    if t == "json":
+        key_path = cfg.get("keys", [])
+        try:
+            from src.config_io import read_json
+            return lambda: read_json(path, *key_path)
+        except ImportError:
+            return None
+    if t == "yaml":
+        key_path = cfg.get("keys", [])
+        try:
+            from src.config_io import read_yaml
+            return lambda: read_yaml(path, *key_path)
+        except ImportError:
+            return None
+    if t == "toml":
+        key = cfg.get("key", "")
+        try:
+            from src.config_io import read_toml
+            return lambda: read_toml(path, key)
+        except ImportError:
+            return None
+    if t == "env":
+        key = cfg.get("key", "")
+        try:
+            from src.config_io import read_env_file
+            return lambda: read_env_file(path, key)
+        except ImportError:
+            return None
     return None
 
 
+def _build_auto_write(cfg: Optional[dict]) -> Optional[Callable[[str], bool]]:
+    """Build an auto_write callable from a YAML auto_fetch config block."""
+    if not cfg:
+        return None
+    t = cfg.get("type")
+    path = cfg.get("path", "")
+    if t == "arr_xml":
+        return _arr_xml_write(path)
+    if t == "xml_tag":
+        return _xml_tag_write(path, cfg.get("tag", "ApiKey"))
+    if t == "ini":
+        section, key = cfg.get("section", ""), cfg.get("key", "")
+        try:
+            from src.config_io import write_ini
+            return lambda v: write_ini(path, section, key, v)
+        except ImportError:
+            return None
+    if t == "json":
+        key_path = cfg.get("keys", [])
+        try:
+            from src.config_io import write_json
+            return lambda v: write_json(path, v, *key_path)
+        except ImportError:
+            return None
+    if t == "yaml":
+        key_path = cfg.get("keys", [])
+        try:
+            from src.config_io import write_yaml
+            return lambda v: write_yaml(path, v, *key_path)
+        except ImportError:
+            return None
+    if t == "toml":
+        key = cfg.get("key", "")
+        try:
+            from src.config_io import write_toml
+            return lambda v: write_toml(path, key, v)
+        except ImportError:
+            return None
+    if t == "env":
+        key = cfg.get("key", "")
+        try:
+            from src.config_io import write_env_file
+            return lambda v: write_env_file(path, key, v)
+        except ImportError:
+            return None
+    return None
+
+
+def build_detected_fetcher(sig: dict, config_path: str) -> Optional[Callable[[], Optional[str]]]:
+    """Return auto_fetch callable for a dynamically-detected service config."""
+    if sig.get("password_hash"):
+        return lambda: None
+
+    fmt = sig.get("format", "")
+    try:
+        from src.config_io import read_env_file, read_ini, read_json, read_toml, read_yaml
+    except ImportError:
+        return None
+
+    def _fetch() -> Optional[str]:
+        if fmt == "ini":
+            return read_ini(config_path, sig["ini_section"], sig["ini_key"])
+        if fmt == "json":
+            return read_json(config_path, *sig["json_path"])
+        if fmt == "yaml":
+            return read_yaml(config_path, *sig["yaml_path"])
+        if fmt == "toml":
+            return read_toml(config_path, sig["toml_key"])
+        if fmt == "env":
+            return read_env_file(config_path, sig["env_key"])
+        return None
+
+    return _fetch
+
+
+def build_detected_writer(sig: dict, config_path: str) -> Optional[Callable[[str], bool]]:
+    """Return auto_write callable for a dynamically-detected service config."""
+    fmt = sig.get("format", "")
+    password_hash = sig.get("password_hash")
+    try:
+        from src.config_io import write_env_file, write_ini, write_json, write_toml, write_yaml
+    except ImportError:
+        return None
+
+    def _hash_val(value: str) -> str:
+        if password_hash == "bcrypt":
+            try:
+                import bcrypt
+                return bcrypt.hashpw(value.encode(), bcrypt.gensalt()).decode()
+            except ImportError:
+                return value
+        if password_hash == "sha256_double":
+            return hashlib.sha256(
+                hashlib.sha256(value.encode()).hexdigest().encode()
+            ).hexdigest()
+        return value
+
+    def _write(new_value: str) -> bool:
+        stored = _hash_val(new_value)
+        if fmt == "ini":
+            return write_ini(config_path, sig["ini_section"], sig["ini_key"], stored)
+        if fmt == "json":
+            return write_json(config_path, stored, *sig["json_path"])
+        if fmt == "yaml":
+            return write_yaml(config_path, stored, *sig["yaml_path"])
+        if fmt == "toml":
+            return write_toml(config_path, sig["toml_key"], stored)
+        if fmt == "env":
+            return write_env_file(config_path, sig["env_key"], stored)
+        return False
+
+    return _write
+
+
 def load_rotate_keys_config(path: Path) -> tuple:
-    """Return (SEARCH_DIRS, SEARCH_EXTS, SKIP_DIRS, REMOTE_HOSTS, SERVICES).
+    """Return (SEARCH_DIRS, SEARCH_EXTS, SKIP_DIRS, REMOTE_HOSTS, SERVICES, ENV_MIRRORS).
     Falls back to hard-coded defaults if YAML is unavailable or file missing."""
     if yaml is None or not path.exists():
         if yaml is None:
@@ -424,6 +439,7 @@ def load_rotate_keys_config(path: Path) -> tuple:
             _DEFAULT_SKIP_DIRS,
             _DEFAULT_REMOTE_HOSTS,
             _DEFAULT_SERVICES,
+            [],
         )
 
     data = yaml.safe_load(path.read_text()) or {}
@@ -452,21 +468,123 @@ def load_rotate_keys_config(path: Path) -> tuple:
             continue
         db_refs_raw = raw.get("db_refs", [])
         db_refs = _resolve_db_refs(db_refs_raw, db_groups)
+        af_cfg = raw.get("auto_fetch")
         services[sid] = ServiceDef(
             display_name=raw.get("display_name", sid),
             env_var=raw.get("env_var", ""),
             settings_url=raw.get("settings_url", ""),
-            auto_fetch=_build_auto_fetch(raw.get("auto_fetch")),
+            auto_fetch=_build_auto_fetch(af_cfg),
+            auto_write=_build_auto_write(af_cfg),
             db_refs=db_refs,
             note=raw.get("note", ""),
-            bitwarden=raw.get("bitwarden", {}),
         )
 
-    return search_dirs, search_exts, skip_dirs, remote_hosts, services
+    env_mirrors = [str(p) for p in data.get("env_mirrors", [])]
+    return search_dirs, search_exts, skip_dirs, remote_hosts, services, env_mirrors
 
 
 _CONFIG_PATH = Path(__file__).with_suffix(".yaml")
-SEARCH_DIRS, SEARCH_EXTS, SKIP_DIRS, REMOTE_HOSTS, SERVICES = load_rotate_keys_config(_CONFIG_PATH)
+SEARCH_DIRS, SEARCH_EXTS, SKIP_DIRS, REMOTE_HOSTS, SERVICES, ENV_MIRRORS = load_rotate_keys_config(_CONFIG_PATH)
+
+
+# ---------------------------------------------------------------------------
+# Auto-discover
+# ---------------------------------------------------------------------------
+
+def apply_auto_discover(services: dict, env: dict, search_dirs: list, skip_dirs: set, remote_hosts: Optional[list] = None) -> None:
+    """Scan filesystem for known service config paths and augment services in-place.
+
+    Sets auto_fetch and auto_write on services that don't have them yet, then
+    reports current key values found in config files that differ from .env.
+    If remote_hosts is provided, also scans remote hosts via SSH.
+    """
+    if not _AUTO_DISCOVER_AVAILABLE:
+        print("  WARNING: Auto-discover modules not found (src/ package missing).")
+        print("  Run from the repository root directory.")
+        return
+
+    print("\n  ─── Auto-Discover: Service Config Paths ──────────────────────")
+    detected = detect_service_paths(search_dirs)
+
+    augmented: list[str] = []
+    for sid, config_path in detected.items():
+        if sid not in services:
+            continue
+        svc = services[sid]
+        sig = APP_SIGNATURES.get(sid)
+        if not sig:
+            continue
+        changed = False
+        if svc.auto_fetch is None:
+            fetcher = build_detected_fetcher(sig, config_path)
+            if fetcher is not None:
+                svc.auto_fetch = fetcher
+                changed = True
+        if svc.auto_write is None:
+            writer = build_detected_writer(sig, config_path)
+            if writer is not None:
+                svc.auto_write = writer
+        if changed:
+            print(f"    ✓ {svc.display_name}: {config_path}")
+            augmented.append(sid)
+
+    if augmented:
+        print(f"  Augmented {len(augmented)} service(s) with auto-fetch: {', '.join(augmented)}")
+    else:
+        print("  No new service configs discovered (all already configured, or no matches)")
+
+    # Key discovery: find current values that differ from .env
+    print("\n  ─── Auto-Discover: Current Key Values ────────────────────────")
+    results = discover_keys(services, env, search_dirs, skip_dirs)
+    if results:
+        print(f"  Found {len(results)} key value(s) that differ from .env:")
+        for r in results:
+            masked = r.value[:4] + "…" + r.value[-4:] if len(r.value) > 8 else "***"
+            print(f"    {r.display_name:<22} [{masked}]  via {r.strategy} ({r.confidence})  ← {r.source_file}")
+        print()
+        print("  These service configs hold values not yet in your .env.")
+        print("  Run the rotation menu to sync them.")
+    else:
+        print("  All discovered service keys match .env (or no differences found)")
+    print()
+
+    # Remote host discovery
+    if not remote_hosts:
+        return
+
+    print("  ─── Auto-Discover: Remote Host Config Paths ──────────────────")
+    for rh in remote_hosts:
+        label = rh.get("label", rh.get("host", "remote"))
+        host = rh.get("host", "")
+        user = rh.get("user", "root")
+        rh_dirs = rh.get("search_dirs", search_dirs)
+        key_path = rh.get("key_path")
+
+        if not host:
+            continue
+
+        print(f"\n  Scanning {label} ({host})...")
+        try:
+            remote_results = discover_remote_keys(
+                host=host,
+                user=user,
+                services=services,
+                env=env,
+                search_dirs=rh_dirs,
+                key_path=key_path,
+            )
+        except Exception as exc:
+            print(f"  WARNING: Remote scan of {label} failed: {exc}")
+            continue
+
+        if remote_results:
+            print(f"  Found {len(remote_results)} key value(s) on {label} that differ from .env:")
+            for r in remote_results:
+                masked = r.value[:4] + "…" + r.value[-4:] if len(r.value) > 8 else "***"
+                print(f"    {r.display_name:<22} [{masked}]  <- {r.source_file}")
+        else:
+            print(f"  All discovered keys on {label} match .env (or no differences found)")
+    print()
 
 
 # ---------------------------------------------------------------------------
@@ -729,10 +847,6 @@ def _key_hash(key: str) -> str:
 # ---------------------------------------------------------------------------
 # Exact-match helpers
 # ---------------------------------------------------------------------------
-# A key is only a real match when surrounded by value-delimiter characters:
-# quotes, =, :, whitespace, XML brackets, or start/end of string.
-# We block adjacency to alphanumeric, hyphen, underscore, dot, and slash so
-# that the key doesn't match inside paths, URLs, or compound identifiers.
 _BOUNDARY = r'(?<![A-Za-z0-9_\-./]){}(?![A-Za-z0-9_\-./])'
 
 
@@ -748,7 +862,6 @@ def _key_replace(old: str, new: str, text: str) -> str:
     return _key_pattern(old).sub(lambda _: new, text)
 
 
-# backup / temp / readme files we should never touch
 _SKIP_NAME_SUFFIXES = (".bak", ".tmp", ".backup", ".old", ".orig", ".swp", "~")
 _SKIP_NAME_PREFIXES = ("readme", "changelog", "license", "copying", ".#")
 
@@ -931,7 +1044,6 @@ def replace_in_files(old: str, new: str, filepaths: list[str]) -> list[str]:
 
 def scan_dbs_for_keys(key_db_refs: dict[str, list]) -> dict[str, list[str]]:
     """Scan local SQLite DBs for multiple keys in a single pass per DB."""
-    # Group: (db, table, col) → [keys to search]
     ref_keys: dict[tuple, list[str]] = {}
     for key, refs in key_db_refs.items():
         for ref in refs:
@@ -1086,7 +1198,6 @@ def build_scan_index(
     if not old_keys:
         return ScanIndex({}, {}, {}, {})
 
-    # --- try cache ---
     cp = cache_path or Path(".rotate_keys_cache.json")
     if not no_cache:
         cached = load_scan_cache(old_keys, cp, cache_max_age)
@@ -1136,7 +1247,6 @@ def build_scan_index(
 
 def replace_in_dbs(old: str, new: str, db_refs: list) -> list[str]:
     changed = []
-    # Deduplicate: process each (db, table, col) only once
     seen: set[tuple] = set()
     for db_path_str, table, col in db_refs:
         key = (db_path_str, table, col)
@@ -1172,29 +1282,6 @@ def replace_in_dbs(old: str, new: str, db_refs: list) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Password generation
-# ---------------------------------------------------------------------------
-
-def generate_password(length: int = 32) -> str:
-    """Generate a cryptographically secure random password."""
-    alphabet = string.ascii_letters + string.digits + "!@#$%^&*-_+=.?"
-    while True:
-        pwd = "".join(secrets.choice(alphabet) for _ in range(length))
-        if (any(c.islower() for c in pwd)
-                and any(c.isupper() for c in pwd)
-                and any(c.isdigit() for c in pwd)
-                and any(c in "!@#$%^&*-_+=.?" for c in pwd)):
-            return pwd
-
-
-def is_password_service(svc: ServiceDef) -> bool:
-    """Return True if this service rotates a password rather than an API key."""
-    if not svc.env_var:
-        return False
-    return svc.env_var.endswith("_PASSWORD") or "password" in svc.display_name.lower()
-
-
-# ---------------------------------------------------------------------------
 # Core rotation logic
 # ---------------------------------------------------------------------------
 
@@ -1209,8 +1296,7 @@ def rotate(
     dry_run: bool = False,
     non_interactive: bool = False,
     backup_dir: Optional[Path] = None,
-    generate_passwords: bool = False,
-    bw_session: Optional[str] = None,
+    auto_write_enabled: bool = False,
 ) -> bool:
     """Rotate a single service. Returns True on success."""
     print(f"\n{'─'*60}")
@@ -1279,11 +1365,7 @@ def rotate(
         if dry_run:
             print(f"  [dry-run] Would update ${svc.env_var} in {env_path}")
             return True
-        if generate_passwords and is_password_service(svc):
-            new_key = generate_password()
-            print("  ✓ Auto-generated password (check .env for the value)")
-        else:
-            new_key = input("  Paste new key/password (or blank to skip): ").strip()
+        new_key = input("  Paste new key/password (or blank to skip): ").strip()
         if not new_key or new_key == old_key:
             print("  No change — skipping")
             return True
@@ -1295,10 +1377,8 @@ def rotate(
     if not non_interactive:
         if svc.settings_url:
             print(f"\n  → Open: {svc.settings_url}")
-        if generate_passwords and is_password_service(svc):
-            print("  → A new password will be generated for you. Update the service, then press Enter.")
-        else:
-            print("  → Rotate / regenerate the key there, then press Enter.")
+        auto_hint = " (will be read automatically)" if svc.auto_fetch else ""
+        print(f"  → Rotate / regenerate the key there{auto_hint}, then press Enter.")
         input("  [Press Enter when done] ")
 
     # Try auto-read
@@ -1306,18 +1386,14 @@ def rotate(
     if svc.auto_fetch:
         new_key = svc.auto_fetch()
         if new_key and new_key != old_key:
-            print(f"  ✓ Auto-read new key from config file ({svc.env_var})")
+            masked = new_key[:6] + "..." + new_key[-4:]
+            print(f"  ✓ Auto-read new key from config file: {masked}")
         else:
             new_key = None
             print("  Could not auto-read (key unchanged or file missing)")
 
-    if not new_key:
-        if generate_passwords and is_password_service(svc):
-            new_key = generate_password()
-            print("  ✓ Auto-generated password (check .env for the value)")
-            print("  → Copy this password into the service if you haven't already.")
-        elif not non_interactive:
-            new_key = input("  Paste new key/password: ").strip()
+    if not non_interactive and not new_key:
+        new_key = input("  Paste new key/password: ").strip()
 
     if not new_key or new_key == old_key:
         print("  No change — skipping")
@@ -1336,6 +1412,8 @@ def rotate(
         for label, hits in remote_db_hits.items():
             for d in hits:
                 print(f"    [{label}] {d}")
+        if svc.auto_write and auto_write_enabled:
+            print(f"  [dry-run] Would auto-write new key to service config file")
         print(f"  [dry-run] Would update {env_path}  (${svc.env_var})")
         return True
 
@@ -1347,6 +1425,13 @@ def rotate(
             dp = Path(db_path_str)
             if dp.exists():
                 _backup_file(dp, backup_dir)
+
+    # Write new key back to service config file if --auto-write was requested
+    if svc.auto_write and auto_write_enabled:
+        if svc.auto_write(new_key):
+            print(f"  ✓ Auto-wrote new key to service config file")
+        else:
+            print(f"  WARNING: Could not auto-write to service config file (manual update may be needed)")
 
     # Apply replacements — local
     print(f"\n  Replacing in files...")
@@ -1369,6 +1454,11 @@ def rotate(
     # Update .env
     env[svc.env_var] = new_key
     write_env(env_path, {svc.env_var: new_key})
+    for _mirror in ENV_MIRRORS:
+        _mp = Path(_mirror)
+        if _mp.parent.exists():
+            write_env(_mp, {svc.env_var: new_key})
+            print(f"  ✓ Mirrored → {_mp}")
 
     total = (len(changed_files) + len(changed_dbs)
              + sum(len(v) for v in remote_changed_files.values())
@@ -1406,14 +1496,6 @@ def rotate(
     # Restart Docker container if configured
     if svc.docker_name:
         restart_docker_container(svc.docker_name)
-
-    # Bitwarden sync
-    if bw_session and svc.bitwarden and is_password_service(svc):
-        bw_ok, bw_msg = sync_bitwarden(svc, new_key, bw_session)
-        if bw_ok:
-            print(f"  ✓ {bw_msg}")
-        else:
-            print(f"  ⚠ Bitwarden sync skipped: {bw_msg}")
 
     # Audit log
     log_audit(env_path, service_id, _key_hash(old_key), _key_hash(new_key),
@@ -1467,16 +1549,12 @@ def main() -> None:
                         help="Skip services rotated within this many days in 'rotate all' (default: 3)")
     parser.add_argument("--include-recent", action="store_true",
                         help="Include recently-rotated services in 'rotate all'")
-    parser.add_argument("--generate-passwords", action="store_true",
-                        help="Auto-generate strong passwords for password-based services instead of prompting")
-    parser.add_argument("--passwords-only", action="store_true",
-                        help="Only rotate services that use passwords (not API keys)")
-    parser.add_argument("--keys-only", action="store_true",
-                        help="Only rotate services that use API keys (not passwords)")
-    parser.add_argument("--sync-bitwarden", action="store_true",
-                        help="Sync rotated passwords back to Bitwarden vault (requires bw CLI)")
-    parser.add_argument("--bw-session", metavar="SESSION",
-                        help="Bitwarden session key (or set BW_SESSION env var)")
+    parser.add_argument("--auto-discover", action="store_true",
+                        help="Scan appdata for service config files, set up auto-fetch/write "
+                             "for discovered services, and report keys that differ from .env")
+    parser.add_argument("--auto-write", action="store_true",
+                        help="After rotation, write the new key back to the service config file "
+                             "(only takes effect for services with auto-fetch/write support)")
     args = parser.parse_args()
 
     env_path = Path(args.env)
@@ -1487,7 +1565,10 @@ def main() -> None:
 
     if args.list:
         for sid, svc in SERVICES.items():
-            print(f"{sid:<20} {svc.display_name}")
+            af = "✓ auto-fetch" if svc.auto_fetch else ""
+            aw = "✓ auto-write" if svc.auto_write else ""
+            caps = "  ".join(x for x in [af, aw] if x)
+            print(f"{sid:<20} {svc.display_name:<35} {caps}")
         return
 
     # Rollback mode
@@ -1511,7 +1592,7 @@ def main() -> None:
     backup_dir: Optional[Path] = _backup_dir(env_path) if args.backup else None
     rotation_log = load_rotation_log()
 
-    # Startup diagnostic — tell the user exactly what was loaded
+    # Startup diagnostic
     services_with_keys = [s for s in SERVICES.values() if s.env_var]
     loaded_count = sum(1 for s in services_with_keys if env.get(s.env_var))
     if not env_path.exists():
@@ -1522,6 +1603,15 @@ def main() -> None:
         print(f"  Found keys for {loaded_count}/{len(services_with_keys)} known services")
         if loaded_count == 0:
             print(f"  WARNING: No service keys found — check your .env format (KEY=value).\n")
+
+    if ENV_MIRRORS:
+        print(f"  env_mirrors: {len(ENV_MIRRORS)} additional .env path(s) updated on rotation")
+        for _mp in ENV_MIRRORS:
+            print(f"    {_mp}")
+
+    # Auto-discover: scan filesystem for service config paths and current key values
+    if args.auto_discover:
+        apply_auto_discover(SERVICES, env, SEARCH_DIRS, SKIP_DIRS, remote_hosts=REMOTE_HOSTS)
 
     # Offer resume if a previous rotation was interrupted
     if completed and not args.service:
@@ -1547,85 +1637,49 @@ def main() -> None:
         cache_max_age=args.cache_max_age,
     )
 
-    # Bitwarden session setup
-    bw_session: Optional[str] = None
-    if args.sync_bitwarden:
-        if not bw_available():
-            print("\n  WARNING: Bitwarden CLI (bw) not found. Install it from https://bitwarden.com/download/")
-            print("  Passwords will be rotated but NOT synced to Bitwarden.\n")
-        else:
-            bw_session = args.bw_session or bw_get_session()
-            if not bw_session and not args.non_interactive:
-                print("\n  Bitwarden vault is locked.")
-                bw_pass = input("  Enter master password (or blank to skip Bitwarden sync): ").strip()
-                if bw_pass:
-                    bw_session = bw_unlock(bw_pass)
-                    if bw_session:
-                        print("  ✓ Vault unlocked")
-                    else:
-                        print("  ✗ Unlock failed — passwords will NOT be synced to Bitwarden")
-            elif bw_session:
-                print("  ✓ Bitwarden session active")
-
     if args.service:
         rotate(args.service, SERVICES[args.service], env, env_path, index,
                state=state, rotation_log=rotation_log,
                dry_run=args.dry_run, non_interactive=args.non_interactive,
-               backup_dir=backup_dir, generate_passwords=args.generate_passwords,
-               bw_session=bw_session)
+               backup_dir=backup_dir, auto_write_enabled=args.auto_write)
         return
 
     # Interactive menu — ordered by priority
     priority_order = [
         "npm", "pangolin", "miniflux",          # internet-facing first
         "prowlarr",                              # most downstream deps
-        "qbittorrent", "sabnzbd", "deluge", "transmission",  # download clients (referenced in all *arrs)
-        "sonarr", "radarr", "lidarr", "readarr", "overseerr", "bazarr", "whisparr",
+        "qbittorrent", "sabnzbd",               # download clients (referenced in all *arrs)
+        "sonarr", "radarr", "lidarr", "readarr", "overseerr", "bazarr",
         "jackett", "autobrr", "slskd",
         "tautulli", "truenas", "immich",
-        "jellyfin", "emby", "jellyseerr", "navidrome", "audiobookshelf",
         "gluetun_unraid", "gluetun_truenas",
         "homebridge", "unifi_os", "unifi_ucg", "qnap", "nut",
-        "komga", "kavita", "mylar",
-        "nextcloud", "syncthing",
-        "adguard", "pihole",
-        "portainer", "uptimekuma",
         "plex",                                  # lowest priority
     ]
 
     service_list = [(sid, SERVICES[sid]) for sid in priority_order if sid in SERVICES]
 
-    if args.passwords_only:
-        service_list = [(sid, svc) for sid, svc in service_list if is_password_service(svc)]
-    elif args.keys_only:
-        service_list = [(sid, svc) for sid, svc in service_list if not is_password_service(svc)]
-
     while True:
-        filter_label = ""
-        if args.passwords_only:
-            filter_label = "  [passwords only]"
-        elif args.keys_only:
-            filter_label = "  [API keys only]"
         print("\n" + "="*60)
-        print(f"  Key Rotation Menu  (ordered by priority){filter_label}")
+        print("  Key Rotation Menu  (ordered by priority)")
         print("="*60)
         for i, (sid, svc) in enumerate(service_list, 1):
             current = env.get(svc.env_var, "") if svc.env_var else ""
             age = days_since_rotated(sid, rotation_log)
-            if age is not None:
-                age_str = f"  ← rotated {age:.0f}d ago"
-            else:
-                age_str = ""
+            age_str = f"  ← rotated {age:.0f}d ago" if age is not None else ""
             if sid in completed:
                 status = "✓ done"
             elif current:
                 status = "✓"
             else:
                 status = "–"
-            print(f"  {i:2}. [{status}] {svc.display_name}{age_str}")
+            auto_cap = " [A]" if (svc.auto_fetch or svc.auto_write) else ""
+            print(f"  {i:2}. [{status}] {svc.display_name}{auto_cap}{age_str}")
         skip_days = args.skip_recent if not args.include_recent else 0
         print(f"\n   a. Rotate ALL remaining (skips services rotated within {skip_days:.0f}d)")
         print("   q. Quit")
+        if any(svc.auto_fetch or svc.auto_write for _, svc in service_list):
+            print("   [A] = auto-fetch/write capable")
 
         choice = input("\nEnter number, 'a', or 'q': ").strip().lower()
 
@@ -1647,8 +1701,7 @@ def main() -> None:
                 rotate(sid, svc, env, env_path, index, state=state,
                        rotation_log=rotation_log,
                        dry_run=args.dry_run, non_interactive=args.non_interactive,
-                       backup_dir=backup_dir, generate_passwords=args.generate_passwords,
-                       bw_session=bw_session)
+                       backup_dir=backup_dir, auto_write_enabled=args.auto_write)
                 env = read_env(env_path)
                 rotated_count += 1
             if rotated_count == 0:
@@ -1656,7 +1709,6 @@ def main() -> None:
                       f"{no_key_count} without keys.")
                 if skipped_count > 0:
                     print(f"  Use --include-recent to rotate them anyway.")
-            # If everything completed, clear the state file so next run starts fresh
             remaining = {sid for sid, _ in service_list if sid not in completed}
             if not remaining:
                 clear_state(env_path)
@@ -1671,8 +1723,7 @@ def main() -> None:
                     rotate(sid, svc, env, env_path, index, state=state,
                            rotation_log=rotation_log,
                            dry_run=args.dry_run, non_interactive=args.non_interactive,
-                           backup_dir=backup_dir, generate_passwords=args.generate_passwords,
-                           bw_session=bw_session)
+                           backup_dir=backup_dir, auto_write_enabled=args.auto_write)
                     completed = set(state.get("completed", []))
                     env = read_env(env_path)
                 else:
