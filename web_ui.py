@@ -22,7 +22,7 @@ except ImportError:
     print("Flask not installed. Run:  pip install flask")
     sys.exit(1)
 
-# ── Load rotate_keys without running main() ────────────────────────────────────────────
+# ── Load rotate_keys without running main() ──────────────────────────────────
 _HERE = Path(__file__).parent
 _spec = importlib.util.spec_from_file_location("rotate_keys", _HERE / "rotate_keys.py")
 rk = importlib.util.module_from_spec(_spec)
@@ -43,7 +43,7 @@ def _env() -> dict:
     return rk.read_env(_ENV_PATH)
 
 
-# ── SSE helpers ────────────────────────────────────────────────────────────────────────
+# ── SSE helpers ──────────────────────────────────────────────────────────────
 
 def _sse(event: str, data: str) -> str:
     return f"event: {event}\ndata: {data}\n\n"
@@ -86,7 +86,7 @@ def _sse_stream(worker):
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-# ── API ─────────────────────────────────────────────────────────────────────────────
+# ── API ───────────────────────────────────────────────────────────────────────
 
 @app.route("/api/services")
 def api_services():
@@ -364,6 +364,12 @@ def api_rotate(sid: str):
             rk.write_env(_ENV_PATH, {svc.env_var: new_key})
             q.put(_log(f"✓ .env updated  (${svc.env_var})"))
 
+            for _mirror in getattr(rk, "ENV_MIRRORS", []):
+                _mp = Path(_mirror)
+                if _mp.parent.exists():
+                    rk.write_env(_mp, {svc.env_var: new_key})
+                    q.put(_log(f"✓ Mirrored → {_mp}"))
+
             rk.log_audit(_ENV_PATH, sid, rk._key_hash(old_key), rk._key_hash(new_key),
                          len(changed_f), len(changed_d), True)
             rlog = rk.load_rotation_log()
@@ -379,7 +385,7 @@ def api_rotate(sid: str):
     return _sse_stream(_worker)
 
 
-# ── HTML frontend ───────────────────────────────────────────────────────────────────────
+# ── HTML frontend ─────────────────────────────────────────────────────────────
 
 @app.route("/")
 def index():
@@ -610,7 +616,7 @@ function appendLog(el, text, forceClass) {
   el.scrollTop = el.scrollHeight;
 }
 
-// ── Services ────────────────────────────────────────────────────────────────────────────
+// ── Services ──────────────────────────────────────────────────────────────────
 let _svcCache = [];
 
 async function loadServices() {
@@ -660,7 +666,7 @@ async function loadServices() {
   });
 }
 
-// ── Modal ─────────────────────────────────────────────────────────────────────────────
+// ── Modal ─────────────────────────────────────────────────────────────────────
 function openModal(sid) {
   const svc = _svcCache.find(s => s.id === sid);
   if (!svc) return;
@@ -777,7 +783,7 @@ function doRotate() {
   });
 }
 
-// ── Discover ───────────────────────────────────────────────────────────────────────────
+// ── Discover ──────────────────────────────────────────────────────────────────
 function runDiscover() {
   const btn = document.getElementById('btn-discover');
   const logEl = document.getElementById('discover-log');
@@ -813,7 +819,7 @@ function runDiscover() {
   es.onerror = () => { es.close(); btn.disabled = false; };
 }
 
-// ── Scan ─────────────────────────────────────────────────────────────────────────────
+// ── Scan ──────────────────────────────────────────────────────────────────────
 function runScan() {
   const btn = document.getElementById('btn-scan');
   const logEl = document.getElementById('scan-log');
@@ -854,7 +860,7 @@ function runScan() {
   es.onerror = () => { es.close(); btn.disabled = false; };
 }
 
-// ── Audit ─────────────────────────────────────────────────────────────────────────────
+// ── Audit ─────────────────────────────────────────────────────────────────────
 async function loadAudit() {
   const res = await fetch('/api/audit');
   const entries = await res.json();
@@ -871,14 +877,14 @@ async function loadAudit() {
   el.innerHTML = h;
 }
 
-// ── Init ─────────────────────────────────────────────────────────────────────────────
+// ── Init ──────────────────────────────────────────────────────────────────────
 loadServices();
 </script>
 </body>
 </html>"""
 
 
-# ── Entry point ──────────────────────────────────────────────────────────────────────────
+# ── Entry point ──────────────────────────────────────────────────────────────
 
 def main() -> None:
     global _ENV_PATH
