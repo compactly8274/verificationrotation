@@ -64,6 +64,12 @@ remote_hosts:
       - ["/mnt/Data/appdata/prowlarr/prowlarr.db", "Indexers", "Settings"]
 
 # ---------------------------------------------------------------------------
+# Additional .env paths to mirror on every rotation
+# (e.g. a second server's .env that shares the same keys)
+# ---------------------------------------------------------------------------
+env_mirrors: []
+
+# ---------------------------------------------------------------------------
 # Named DB reference groups (referenced by services below)
 # ---------------------------------------------------------------------------
 db_ref_groups:
@@ -96,7 +102,6 @@ services:
     display_name: Sonarr
     env_var: SONARR_API_KEY
     settings_url: http://192.168.1.104:8989/settings/general
-    docker_name: sonarr
     auto_fetch:
       type: arr_xml
       path: /mnt/user/appdata/sonarr/config.xml
@@ -107,7 +112,6 @@ services:
     display_name: Radarr
     env_var: RADARR_API_KEY
     settings_url: http://192.168.1.104:7878/settings/general
-    docker_name: radarr
     auto_fetch:
       type: arr_xml
       path: /mnt/user/appdata/radarr/config.xml
@@ -118,7 +122,6 @@ services:
     display_name: Lidarr
     env_var: LIDARR_API_KEY
     settings_url: http://192.168.1.104:8686/settings/general
-    docker_name: lidarr
     auto_fetch:
       type: arr_xml
       path: /mnt/user/appdata/lidarr/config.xml
@@ -129,7 +132,6 @@ services:
     display_name: Readarr
     env_var: READARR_API_KEY
     settings_url: http://192.168.1.104:8787/settings/general
-    docker_name: readarr
     auto_fetch:
       type: arr_xml
       path: /mnt/user/appdata/readarr/config.xml
@@ -140,7 +142,6 @@ services:
     display_name: Prowlarr
     env_var: PROWLARR_API_KEY
     settings_url: http://192.168.1.122:9696/settings/general
-    docker_name: prowlarr
     auto_fetch:
       type: arr_xml
       path: /mnt/user/appdata/prowlarr/config.xml
@@ -175,15 +176,6 @@ services:
     env_var: SLSKD_API_KEY
     settings_url: http://192.168.1.104:5035/settings
 
-  whisparr:
-    display_name: Whisparr
-    env_var: WHISPARR_API_KEY
-    settings_url: http://192.168.1.104:6969/settings/general
-    docker_name: whisparr
-    auto_fetch:
-      type: arr_xml
-      path: /mnt/user/appdata/whisparr/config.xml
-
   plex:
     display_name: Plex
     env_var: PLEX_TOKEN
@@ -194,36 +186,6 @@ services:
     display_name: Tautulli
     env_var: TAUTULLI_API_KEY
     settings_url: http://192.168.1.104:8189/settings
-
-  jellyfin:
-    display_name: Jellyfin
-    env_var: JELLYFIN_API_KEY
-    settings_url: http://192.168.1.104:8096
-    note: API keys are under Dashboard > Advanced > API Keys.
-
-  emby:
-    display_name: Emby
-    env_var: EMBY_API_KEY
-    settings_url: ""
-    note: API keys are under Server > Advanced > API Keys. Verify the host:port in your setup.
-
-  jellyseerr:
-    display_name: Jellyseerr
-    env_var: JELLYSEERR_API_KEY
-    settings_url: ""
-    note: API keys are under Settings > Jellyseerr. Verify the host:port in your setup.
-
-  navidrome:
-    display_name: Navidrome
-    env_var: NAVIDROME_TOKEN
-    settings_url: http://192.168.1.104:4533
-    note: Also set NAVIDROME_USER. Create a new token in Profile > Change Password > Tokens.
-
-  audiobookshelf:
-    display_name: Audiobookshelf
-    env_var: AUDIOBOOKSHELF_API_KEY
-    settings_url: http://192.168.1.104:13378
-    note: Create API tokens under Settings > Users > (user) > API Tokens.
 
   sabnzbd:
     display_name: SABnzbd
@@ -239,36 +201,12 @@ services:
     db_refs:
       - arr_dlclient
     note: Change password in qBittorrent WebUI Options > Web UI > Password.
-    bitwarden:
-      item_name: qBittorrent Web UI
-
-  deluge:
-    display_name: Deluge
-    env_var: DELUGE_PASSWORD
-    settings_url: ""
-    db_refs:
-      - arr_dlclient
-    note: Change WebUI password in Preferences > Interface. Verify the host:port in your setup.
-    bitwarden:
-      item_name: Deluge Web UI
-
-  transmission:
-    display_name: Transmission
-    env_var: TRANSMISSION_PASSWORD
-    settings_url: ""
-    db_refs:
-      - arr_dlclient
-    note: Also set TRANSMISSION_USERNAME. Change RPC password in settings.json or via the Web UI. Verify the host:port in your setup.
-    bitwarden:
-      item_name: Transmission Web UI
 
   npm:
     display_name: Nginx Proxy Manager  ← DO THIS FIRST (public VPS)
     env_var: NPM_PASSWORD
     settings_url: http://172.245.73.170:81
     note: This is internet-facing. Highest priority.
-    bitwarden:
-      item_name: Nginx Proxy Manager
 
   pangolin:
     display_name: Pangolin
@@ -303,8 +241,6 @@ services:
     env_var: HOMEBRIDGE_PASSWORD
     settings_url: http://192.168.1.104:8581
     note: Change under User Accounts in Homebridge settings.
-    bitwarden:
-      item_name: Homebridge
 
   immich:
     display_name: Immich
@@ -331,78 +267,9 @@ services:
     display_name: QNAP password
     env_var: QNAP_PASSWORD
     settings_url: https://192.168.1.168
-    bitwarden:
-      item_name: QNAP NAS
 
   nut:
     display_name: NUT/Peanut password
     env_var: NUT_PASSWORD
     settings_url: ""
     note: Update in the NUT server config and in all services that reference it.
-    bitwarden:
-      item_name: NUT Server
-
-  komga:
-    display_name: Komga
-    env_var: KOMGA_PASSWORD
-    settings_url: ""
-    note: Also set KOMGA_USERNAME. Change password in Server Settings > Authentication. Verify the host:port in your setup.
-    bitwarden:
-      item_name: Komga
-
-  kavita:
-    display_name: Kavita
-    env_var: KAVITA_API_KEY
-    settings_url: ""
-    note: API keys are under User Dashboard > 3rd Party Clients. Verify the host:port in your setup.
-
-  mylar:
-    display_name: Mylar
-    env_var: MYLAR_API_KEY
-    settings_url: ""
-    note: API key is under Configuration > Web Interface. Verify the host:port in your setup.
-
-  nextcloud:
-    display_name: Nextcloud
-    env_var: NEXTCLOUD_PASSWORD
-    settings_url: ""
-    note: Also set NEXTCLOUD_USERNAME. Change password via User Settings > Security. Verify the host:port in your setup.
-    bitwarden:
-      item_name: Nextcloud
-
-  syncthing:
-    display_name: Syncthing
-    env_var: SYNCTHING_API_KEY
-    settings_url: http://192.168.1.104:8384
-    docker_name: syncthing
-    auto_fetch:
-      type: xml_tag
-      path: /mnt/user/appdata/syncthing/config.xml
-      tag: apikey
-    note: API key is in Settings > GUI.
-
-  adguard:
-    display_name: AdGuard Home
-    env_var: ADGUARD_PASSWORD
-    settings_url: ""
-    note: Also set ADGUARD_USERNAME. Change password in Settings > General Settings > Web interface. Verify the host:port in your setup.
-    bitwarden:
-      item_name: AdGuard Home
-
-  pihole:
-    display_name: Pi-hole
-    env_var: PIHOLE_API_KEY
-    settings_url: ""
-    note: API token is under Settings > API > Show API token. Verify the host:port in your setup.
-
-  portainer:
-    display_name: Portainer
-    env_var: PORTAINER_API_KEY
-    settings_url: ""
-    note: Also set PORTAINER_ENV. Create API keys under My Account > API keys. Verify the host:port in your setup.
-
-  uptimekuma:
-    display_name: Uptime Kuma
-    env_var: UPTIMEKUMA_API_KEY
-    settings_url: ""
-    note: Also set UPTIMEKUMA_SLUG. API keys are under Settings > API Keys. Verify the host:port in your setup.
