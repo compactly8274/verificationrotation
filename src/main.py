@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import queue
+import shlex
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -35,7 +36,7 @@ from src.config import settings
 from src.crypto import decrypt_value, encrypt_value, mask_value
 from src.database import async_session, init_db
 from src.env_manager import read_env, write_env
-from src.key_discovery import discover_keys
+from src.key_discovery import discover_keys, upsert_discovered_keys
 from src.models import DiscoveredKey, RemoteHost, RotationHistory, ScanLog, Service, SSHKey
 from src.notifications import send_notification
 from src.path_discovery import detect_service_paths
@@ -48,8 +49,20 @@ from src.services_registry import (
     load_rotate_keys_config,
 )
 from src.ssh_keys import delete_ssh_key, generate_ssh_key, get_ssh_key, test_ssh_connection
+from src.utils import (
+    validate_db_refs_list,
+    validate_hostname,
+    validate_ssh_key_name,
+    validate_url_no_private,
+    validate_username,
+)
 
 logger = logging.getLogger("verificationrotation")
+
+
+def _key_hash(key: str) -> str:
+    """Return a truncated SHA-256 hash of a key for audit logging."""
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 # ---------------------------------------------------------------------------
 # Globals
@@ -63,6 +76,7 @@ rotation_in_progress: Optional[dict] = None        # {service_id, started_at}
 auto_rotation_running: bool = False                 # True while auto-rotate job executes
 
 _bw_session: Optional[str] = None                  # in-memory Bitwarden session token
+_bw_session_time: Optional[datetime] = None         # when the session was acquired
 
 # Async locks to prevent race conditions on shared state
 _rotation_lock = asyncio.Lock()
@@ -207,13 +221,25 @@ def verify_csrf_token(request: Request) -> None:
 
 
 def get_bw_session() -> Optional[str]:
-    """Return in-memory session, falling back to env-var session, then auto-auth from config."""
-    global _bw_session
+    """Return in-memory session, falling back to env-var session, then auto-auth from config.
+
+    Respects BW_SESSION_TIMEOUT_MINUTES — if set, sessions older than the timeout
+    are cleared and re-authenticated.
+    """
+    global _bw_session, _bw_session_time
+    # Check session timeout
+    if _bw_session and settings.bw_session_timeout_minutes > 0 and _bw_session_time:
+        age = (datetime.now() - _bw_session_time).total_seconds() / 60
+        if age > settings.bw_session_timeout_minutes:
+            logger.info("Bitwarden session expired (age=%.0f min), clearing", age)
+            _bw_session = None
+            _bw_session_time = None
     if _bw_session:
         return _bw_session
     env_session = bw_get_session()
     if env_session:
         _bw_session = env_session
+        _bw_session_time = datetime.now()
         return _bw_session
     # If API key credentials are pre-configured, authenticate transparently
     if settings.bw_client_id and settings.bw_client_secret and settings.bw_master_password:
@@ -225,6 +251,7 @@ def get_bw_session() -> Optional[str]:
         )
         if session:
             _bw_session = session
+            _bw_session_time = datetime.now()
             logger.info("Bitwarden session auto-refreshed via configured API key")
             return session
         logger.warning("Bitwarden auto-refresh failed: %s", err)
@@ -272,7 +299,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="VerificationRotation", lifespan=lifespan)
-app.add_middleware(SessionMiddleware, secret_key=settings.secret_key, max_age=3600 * 24 * 7, same_site="strict", https_only=settings.cookie_https_only)
+app.add_middleware(SessionMiddleware, secret_key=settings.secret_key, max_age=3600 * 4, same_site="strict", https_only=settings.cookie_https_only)
 
 # Rate limiting
 limiter = Limiter(key_func=get_remote_address, default_limits=["60/minute"])
@@ -383,6 +410,15 @@ async def _seed_services():
                     is_password=1 if is_password_service(svc) else 0,
                     settings_url=svc.settings_url,
                 ))
+            else:
+                # Reconcile — update fields that may have changed in YAML
+                if existing.display_name != svc.display_name:
+                    existing.display_name = svc.display_name
+                if existing.env_var != svc.env_var:
+                    existing.env_var = svc.env_var
+                new_is_password = 1 if is_password_service(svc) else 0
+                if existing.is_password != new_is_password:
+                    existing.is_password = new_is_password
         import sqlalchemy
         host_count = await session.execute(select(sqlalchemy.func.count(RemoteHost.id)))
         if host_count.scalar() == 0:
@@ -548,12 +584,14 @@ async def _auto_rotate_stale():
                 svc = services[sid]
                 if not svc.env_var or not env.get(svc.env_var):
                     continue
-                if _rotation_is_running():
-                    logger.warning("Auto-rotate: rotation lock held, stopping")
-                    break
-                global rotation_in_progress
-                rotation_in_progress = {"service_id": sid, "started_at": datetime.now()}
+                async with _rotation_lock:
+                    if _rotation_is_running():
+                        logger.warning("Auto-rotate: rotation lock held, stopping")
+                        break
+                    global rotation_in_progress
+                    rotation_in_progress = {"service_id": sid, "started_at": datetime.now()}
                 try:
+                    old_hash = _key_hash(env.get(svc.env_var, ""))
                     ok = rotate(
                         sid, svc, env, settings.env_file, scan_index,
                         rotation_log={},
@@ -574,7 +612,7 @@ async def _auto_rotate_stale():
                             )
                             session.add(RotationHistory(
                                 service_id=sid,
-                                old_hash="",
+                                old_hash=old_hash,
                                 new_hash=new_hash,
                                 success=1,
                                 message="Auto-rotated (scheduled)",
@@ -584,7 +622,7 @@ async def _auto_rotate_stale():
                         async with async_session() as session:
                             session.add(RotationHistory(
                                 service_id=sid,
-                                old_hash="",
+                                old_hash=old_hash,
                                 new_hash="",
                                 success=0,
                                 message="Auto-rotate failed",
@@ -697,8 +735,10 @@ async def api_bw_login(
         raise HTTPException(status_code=503, detail="Bitwarden CLI not installed")
     session, err = bw_login(email, master_password, server_url=server_url, mfa_code=mfa_code, mfa_method=mfa_method)
     if not session:
-        raise HTTPException(status_code=403, detail=f"Login failed: {err}")
+        logger.warning("Bitwarden login failed: %s", err)
+        raise HTTPException(status_code=403, detail="Login failed. Check your credentials and try again.")
     _bw_session = session
+    _bw_session_time = datetime.now()
     return {"success": True, "message": f"Logged in and unlocked as {email}"}
 
 
@@ -719,8 +759,10 @@ async def api_bw_login_apikey(
         raise HTTPException(status_code=503, detail="Bitwarden CLI not installed")
     session, err = bw_login_apikey(client_id, client_secret, master_password, server_url=server_url)
     if not session:
-        raise HTTPException(status_code=403, detail=f"API key login failed: {err}")
+        logger.warning("Bitwarden API key login failed: %s", err)
+        raise HTTPException(status_code=403, detail="API key login failed. Check your credentials and try again.")
     _bw_session = session
+    _bw_session_time = datetime.now()
     return {"success": True, "message": "Logged in via API key and unlocked vault"}
 
 
@@ -749,8 +791,10 @@ async def api_bw_unlock(request: Request, master_password: str = Form(...)):
         )
     session, err = bw_unlock(master_password)
     if not session:
-        raise HTTPException(status_code=403, detail=f"Unlock failed: {err}")
+        logger.warning("Bitwarden unlock failed: %s", err)
+        raise HTTPException(status_code=403, detail="Unlock failed. Check your master password and try again.")
     _bw_session = session
+    _bw_session_time = datetime.now()
     return {"success": True, "message": "Bitwarden unlocked"}
 
 
@@ -758,8 +802,9 @@ async def api_bw_unlock(request: Request, master_password: str = Form(...)):
 @limiter.limit("5/minute")
 async def api_bw_lock(request: Request):
     require_auth(request)
-    global _bw_session
+    global _bw_session, _bw_session_time
     _bw_session = None
+    _bw_session_time = None
     return {"success": True, "message": "Bitwarden session cleared"}
 
 
@@ -798,6 +843,12 @@ async def api_services(request: Request):
 @app.put("/api/services/{service_id}")
 async def api_services_update(request: Request, service_id: str, settings_url: str = Form("")):
     require_auth(request)
+    # Validate settings_url to prevent SSRF
+    if settings_url:
+        try:
+            validate_url_no_private(settings_url)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
     async with async_session() as session:
         result = await session.execute(select(Service).where(Service.id == service_id))
         row = result.scalar_one_or_none()
@@ -862,6 +913,7 @@ async def api_rotate(
             rotation_in_progress = {"service_id": service_id, "started_at": datetime.now()}
 
     logger.info("Rotating %s (dry_run=%s)", service_id, dry_run)
+    old_hash = _key_hash(env.get(svc.env_var, ""))
     rotation_log = {}
     _buf = io.StringIO()
     try:
@@ -894,7 +946,7 @@ async def api_rotate(
                 )
                 session.add(RotationHistory(
                     service_id=service_id,
-                    old_hash="",
+                    old_hash=old_hash,
                     new_hash=new_hash,
                     success=1,
                     message="Rotated via web UI",
@@ -902,7 +954,7 @@ async def api_rotate(
             else:
                 session.add(RotationHistory(
                     service_id=service_id,
-                    old_hash="",
+                    old_hash=old_hash,
                     new_hash="",
                     success=0,
                     message="Rotation failed via web UI",
@@ -969,6 +1021,7 @@ async def api_rotate_stream(
             rotation_in_progress = {"service_id": service_id, "started_at": datetime.now()}
 
     logger.info("Streaming rotation for %s (dry_run=%s)", service_id, dry_run)
+    old_hash = _key_hash(env.get(svc.env_var, ""))
     q: queue.Queue = queue.Queue()
     ok_result = [False]
 
@@ -1027,7 +1080,7 @@ async def api_rotate_stream(
                         )
                         session.add(RotationHistory(
                             service_id=service_id,
-                            old_hash="",
+                            old_hash=old_hash,
                             new_hash=new_hash,
                             success=1,
                             message="Rotated via web UI (streamed)",
@@ -1035,7 +1088,7 @@ async def api_rotate_stream(
                     else:
                         session.add(RotationHistory(
                             service_id=service_id,
-                            old_hash="",
+                            old_hash=old_hash,
                             new_hash="",
                             success=0,
                             message="Rotation failed via web UI (streamed)",
@@ -1115,7 +1168,7 @@ async def api_rotate_all(
                     )
                 )
                 session.add(RotationHistory(
-                    service_id=sid, old_hash="", new_hash=new_hash, success=1,
+                    service_id=sid, old_hash=_key_hash(env.get(svc.env_var, "")), new_hash=new_hash, success=1,
                     message="Rotated via bulk rotate-all",
                 ))
                 await session.commit()
@@ -1175,8 +1228,20 @@ async def api_hosts_create(
     db_refs: str = Form("[]"),
 ):
     require_auth(request)
+    # Validate host and user to prevent SSH command injection
+    try:
+        validate_hostname(host)
+        validate_username(user)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     search_dirs_json = _parse_json_field(search_dirs, "search_dirs")
     db_refs_json = _parse_json_field(db_refs, "db_refs")
+    # Validate db_refs SQL identifiers to prevent SQL injection on remote hosts
+    try:
+        parsed_refs = json.loads(db_refs_json)
+        validate_db_refs_list(parsed_refs)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     async with async_session() as session:
         session.add(RemoteHost(label=label, host=host, user=user, search_dirs=search_dirs_json, db_refs=db_refs_json))
         await session.commit()
@@ -1194,8 +1259,20 @@ async def api_hosts_update(
     db_refs: str = Form("[]"),
 ):
     require_auth(request)
+    # Validate host and user to prevent SSH command injection
+    try:
+        validate_hostname(host)
+        validate_username(user)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     search_dirs_json = _parse_json_field(search_dirs, "search_dirs")
     db_refs_json = _parse_json_field(db_refs, "db_refs")
+    # Validate db_refs SQL identifiers to prevent SQL injection on remote hosts
+    try:
+        parsed_refs = json.loads(db_refs_json)
+        validate_db_refs_list(parsed_refs)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     async with async_session() as session:
         result = await session.execute(select(RemoteHost).where(RemoteHost.id == host_id))
         row = result.scalar_one_or_none()
@@ -1247,11 +1324,13 @@ async def api_hosts_generate_key(request: Request, host_id: int):
         row.ssh_public_key = pub_key
         await session.commit()
 
-    home = "/root" if user == "root" else f"/home/{user}"
+    home = "/root" if user == "root" else f"/home/{shlex.quote(user)}"
+    quoted_home = shlex.quote(f"/root" if user == "root" else f"/home/{user}")
+    quoted_key = shlex.quote(pub_key)
     setup_script = (
-        f"mkdir -p {home}/.ssh && chmod 700 {home}/.ssh\n"
-        f"echo '{pub_key}' >> {home}/.ssh/authorized_keys\n"
-        f"chmod 600 {home}/.ssh/authorized_keys"
+        f"mkdir -p {quoted_home}/.ssh && chmod 700 {quoted_home}/.ssh\n"
+        f"echo {quoted_key} >> {quoted_home}/.ssh/authorized_keys\n"
+        f"chmod 600 {quoted_home}/.ssh/authorized_keys"
     )
     return {"public_key": pub_key, "setup_script": setup_script, "host": host_addr, "user": user}
 
@@ -1307,6 +1386,10 @@ async def api_ssh_keys(request: Request):
 async def api_ssh_keys_create(request: Request, name: str = Form(...)):
     require_auth(request)
     try:
+        validate_ssh_key_name(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    try:
         public_key, private_path = generate_ssh_key(name)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -1335,6 +1418,7 @@ async def api_ssh_keys_delete(request: Request, key_id: int):
 # ---------------------------------------------------------------------------
 
 @app.post("/api/detect-service-paths")
+@limiter.limit("2/minute")
 async def api_detect_service_paths(request: Request):
     """Scan DISCOVERY_SEARCH_DIRS for known service config files and persist paths."""
     require_auth(request)
@@ -1375,8 +1459,8 @@ async def api_detect_service_paths(request: Request):
         logger.error("detect-service-paths timed out after %d minutes", settings.scan_timeout_minutes)
         raise HTTPException(status_code=504, detail=f"Detection timed out after {settings.scan_timeout_minutes} minutes. Try narrowing DISCOVERY_SEARCH_DIRS.")
     except Exception as exc:
-        logger.exception("detect-service-paths failed")
-        raise HTTPException(status_code=500, detail=str(exc))
+        logger.exception("detect-service-paths failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Service path detection failed. Check server logs for details.")
 
 
 @app.get("/api/detected-service-paths")
@@ -1425,6 +1509,7 @@ async def discovery_page(request: Request):
 
 
 @app.post("/api/discover-keys")
+@limiter.limit("2/minute")
 async def api_discover_keys(
     request: Request,
     search_dirs: Optional[str] = Form(None),
@@ -1464,29 +1549,8 @@ async def api_discover_keys(
         logger.error("discover-keys timed out after %d minutes", settings.scan_timeout_minutes)
         raise HTTPException(status_code=504, detail=f"Scan timed out after {settings.scan_timeout_minutes} minutes. Try narrowing DISCOVERY_SEARCH_DIRS.")
 
-    stored = []
     async with async_session() as session:
-        for r in results:
-            encrypted = encrypt_value(r.value)
-            dk = DiscoveredKey(
-                service_id=r.service_id,
-                env_var=r.env_var,
-                display_name=r.display_name,
-                value_encrypted=encrypted,
-                source_file=r.source_file,
-                confidence=r.confidence,
-                strategy=r.strategy,
-            )
-            session.add(dk)
-            stored.append({
-                "service_id": r.service_id,
-                "env_var": r.env_var,
-                "display_name": r.display_name,
-                "value_masked": mask_value(r.value),
-                "source_file": r.source_file,
-                "confidence": r.confidence,
-                "strategy": r.strategy,
-            })
+        stored = await upsert_discovered_keys(session, results)
         await session.commit()
 
     return {"found": len(results), "results": stored}
@@ -1498,21 +1562,25 @@ async def api_list_discovered_keys(request: Request):
     require_auth(request)
     async with async_session() as session:
         rows = (await session.execute(select(DiscoveredKey))).scalars().all()
-        return [
-            {
+        result = []
+        for r in rows:
+            try:
+                value_masked = mask_value(decrypt_value(r.value_encrypted))
+            except ValueError:
+                value_masked = "[decryption failed]"
+            result.append({
                 "id": r.id,
                 "service_id": r.service_id,
                 "env_var": r.env_var,
                 "display_name": r.display_name,
-                "value_masked": mask_value(decrypt_value(r.value_encrypted)),
+                "value_masked": value_masked,
                 "source_file": r.source_file,
                 "confidence": r.confidence,
                 "strategy": r.strategy,
                 "discovered_at": r.discovered_at.isoformat() if r.discovered_at else None,
                 "applied_at": r.applied_at.isoformat() if r.applied_at else None,
-            }
-            for r in rows
-        ]
+            })
+        return result
 
 
 @app.post("/api/discovered-keys/{key_id}/apply")
@@ -1543,12 +1611,14 @@ async def api_apply_discovered_key(request: Request, key_id: int):
         svc_row = await session.get(Service, service_id)
         known_hits = svc_row.hit_count if svc_row else -1
 
-    if _rotation_is_running() or _rotation_lock.locked():
-        raise HTTPException(status_code=409, detail="Rotation already in progress. Try again shortly.")
+    async with _rotation_lock:
+        if _rotation_is_running():
+            raise HTTPException(status_code=409, detail="Rotation already in progress. Try again shortly.")
+        rotation_in_progress = {"service_id": service_id, "started_at": datetime.now()}
 
-    rotation_in_progress = {"service_id": service_id, "started_at": datetime.now()}
     logger.info("Applying discovered key for %s (%s)", service_id, row.env_var)
 
+    old_hash = _key_hash(env.get(svc.env_var, ""))
     _buf = io.StringIO()
     try:
         with contextlib.redirect_stdout(_buf):
@@ -1579,7 +1649,7 @@ async def api_apply_discovered_key(request: Request, key_id: int):
             )
             session.add(RotationHistory(
                 service_id=service_id,
-                old_hash="",
+                old_hash=old_hash,
                 new_hash=new_hash,
                 success=1,
                 message="Applied discovered key",
@@ -1588,7 +1658,7 @@ async def api_apply_discovered_key(request: Request, key_id: int):
         else:
             session.add(RotationHistory(
                 service_id=service_id,
-                old_hash="",
+                old_hash=old_hash,
                 new_hash="",
                 success=0,
                 message="Discovered key apply failed",
@@ -1599,6 +1669,7 @@ async def api_apply_discovered_key(request: Request, key_id: int):
 
 
 @app.post("/api/discovered-keys/apply-all")
+@limiter.limit("2/minute")
 async def api_apply_all_discovered_keys(request: Request):
     """Apply all high-confidence discovered keys that haven't been applied yet."""
     require_auth(request)
@@ -1631,9 +1702,11 @@ async def api_apply_all_discovered_keys(request: Request):
             results.append({"id": row.id, "service_id": sid, "success": False, "message": "Service no longer configured"})
             continue
 
-        if _rotation_is_running() or _rotation_lock.locked():
-            results.append({"id": row.id, "service_id": sid, "success": False, "message": "Rotation already in progress"})
-            break
+        async with _rotation_lock:
+            if _rotation_is_running():
+                results.append({"id": row.id, "service_id": sid, "success": False, "message": "Rotation already in progress"})
+                break
+            rotation_in_progress = {"service_id": sid, "started_at": datetime.now()}
 
         svc = services[sid]
         plaintext = decrypt_value(row.value_encrypted)
@@ -1642,8 +1715,8 @@ async def api_apply_all_discovered_keys(request: Request):
             svc_row = await session.get(Service, sid)
             known_hits = svc_row.hit_count if svc_row else -1
 
-        rotation_in_progress = {"service_id": sid, "started_at": datetime.now()}
         logger.info("Bulk-apply: applying discovered key for %s", sid)
+        old_hash = _key_hash(env.get(svc.env_var, ""))
         try:
             ok = rotate(
                 sid, svc, env, settings.env_file, scan_index,
@@ -1674,13 +1747,13 @@ async def api_apply_all_discovered_keys(request: Request):
                     )
                 )
                 session.add(RotationHistory(
-                    service_id=sid, old_hash="", new_hash=new_hash, success=1,
+                    service_id=sid, old_hash=old_hash, new_hash=new_hash, success=1,
                     message="Applied discovered key (bulk)",
                 ))
                 db_row.applied_at = datetime.now()
             else:
                 session.add(RotationHistory(
-                    service_id=sid, old_hash="", new_hash="", success=0,
+                    service_id=sid, old_hash=old_hash, new_hash="", success=0,
                     message="Discovered key apply failed (bulk)",
                 ))
             await session.commit()
@@ -1700,6 +1773,21 @@ async def api_clear_discovered_keys(request: Request):
         await session.execute(sa_delete(DiscoveredKey))
         await session.commit()
     return {"success": True}
+
+
+@app.post("/api/admin/reencrypt")
+@limiter.limit("1/hour")
+async def api_reencrypt_discovered_keys(request: Request):
+    """Re-encrypt all discovered keys using the current KDF derivation.
+
+    Run after changing KDF_SALT or SECRET_KEY (the latter is destructive —
+    existing rows can only be re-encrypted if you still have the old key).
+    Idempotent: rows already on the current derivation are skipped.
+    """
+    require_auth(request)
+    from src.migration import reencrypt_all
+    result = await reencrypt_all()
+    return {"success": result.failed == 0, **result.as_dict()}
 
 
 @app.post("/api/reset-password")

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from src.config import settings
+from src.utils import validate_url_https
 
 _COLORS = {
     "rotation_start": 0x3498DB,       # blue
@@ -90,6 +91,13 @@ def send_notification(
     """Send a webhook notification. Never raises — failures are logged to stderr."""
     url = settings.webhook_url
     if not url:
+        return
+    # Validate URL to prevent SSRF (webhook URLs must be HTTPS and must
+    # not point at private/reserved addresses).
+    try:
+        validate_url_https(url)
+    except ValueError as exc:
+        print(f"[notifications] Webhook URL blocked: {exc}", file=sys.stderr)
         return
     wtype = settings.webhook_type.lower()
     try:

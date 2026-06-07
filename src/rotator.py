@@ -23,14 +23,17 @@ from src.services_registry import ServiceDef
 logger = logging.getLogger("verificationrotation")
 
 
+SPECIAL_CHARS = "!@#$%^&*_-+=.?"
+
+
 def generate_password(length: int = 32) -> str:
-    alphabet = string.ascii_letters + string.digits + "!@#$%^&*_-+=.?"
+    alphabet = string.ascii_letters + string.digits + SPECIAL_CHARS
     while True:
         pwd = "".join(secrets.choice(alphabet) for _ in range(length))
         if (any(c.islower() for c in pwd)
                 and any(c.isupper() for c in pwd)
                 and any(c.isdigit() for c in pwd)
-                and any(c in "!@#$%^*&*-_+=.?" for c in pwd)):
+                and any(c in SPECIAL_CHARS for c in pwd)):
             return pwd
 
 
@@ -47,6 +50,12 @@ def is_password_service(svc: ServiceDef) -> bool:
 def _health_check(url: str, expected_key: Optional[str] = None, timeout: int = 10) -> tuple[bool, str]:
     if not url:
         return True, "No health URL configured"
+    # Validate URL to prevent SSRF
+    try:
+        from src.utils import validate_url_no_private
+        validate_url_no_private(url)
+    except ValueError as exc:
+        return False, str(exc)
     try:
         import ssl
         import urllib.request

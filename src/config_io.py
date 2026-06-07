@@ -203,7 +203,8 @@ def write_env_file(path: str, key: str, value: str) -> bool:
         if fp.exists() and _check_symlink(fp):
             return False
         text = fp.read_text(errors="ignore") if fp.exists() else ""
-        pattern = re.compile(rf"(?m)^{re.escape(key)}=.*$")
+        # Use word boundary to avoid matching partial keys (e.g., "API" matching "API_KEY")
+        pattern = re.compile(rf"(?m)^{re.escape(key)}(?!=)=.*$")
         updated, count = pattern.subn(f"{key}={value}", text)
         if not count:
             updated = text.rstrip() + f"\n{key}={value}\n"

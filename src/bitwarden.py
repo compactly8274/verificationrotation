@@ -10,7 +10,7 @@ from src.services_registry import ServiceDef
 
 def bw_available() -> bool:
     try:
-        subprocess.run(["bw", "--version"], capture_output=True, check=True)
+        subprocess.run(["bw", "--version"], capture_output=True, check=True, timeout=10)
         return True
     except Exception:
         return False

@@ -5,7 +5,6 @@ services:
     restart: unless-stopped
     environment:
       CONTAINERS: 1
-      POST: 1
       NETWORKS: 0
       VOLUMES: 0
       IMAGES: 0

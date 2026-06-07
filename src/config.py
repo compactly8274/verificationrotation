@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     bw_master_password: str = Field(default="", alias="BW_MASTER_PASSWORD")
     bw_server_url: str = Field(default="", alias="BW_SERVER_URL")  # for self-hosted Vaultwarden
 
+    # Bitwarden session timeout in minutes (0 = no timeout, session lasts forever)
+    bw_session_timeout_minutes: int = Field(default=0, alias="BW_SESSION_TIMEOUT_MINUTES")
+
     # Scanning
     scan_interval_minutes: int = Field(default=360, alias="SCAN_INTERVAL_MINUTES")
     cache_max_age_hours: float = Field(default=4.0, alias="CACHE_MAX_AGE_HOURS")
@@ -105,9 +108,32 @@ if settings.secret_key == "change-me-in-production":
     )
     raise SystemExit(1)
 
+# Warn about short SECRET_KEYs — they're accepted but weak.
+if len(settings.secret_key) < 32:
+    logger.warning(
+        "SECRET_KEY is shorter than 32 characters (%d chars). "
+        "For better security, use a longer key (e.g., 64+ characters).",
+        len(settings.secret_key),
+    )
+
 # Loud warning if SSL verification is disabled for health checks.
 if settings.health_check_skip_ssl:
     logger.warning(
         "HEALTH_CHECK_SKIP_SSL is enabled — SSL certificates will not be verified "
         "during health checks. This is insecure and should only be used for local testing."
+    )
+
+# Warn about plaintext Bitwarden credentials in environment.
+if settings.bw_master_password:
+    logger.warning(
+        "BW_MASTER_PASSWORD is set in the environment. Consider using Docker secrets "
+        "or a file-based approach instead of plaintext environment variables for "
+        "sensitive credentials. See the documentation for secure credential management."
+    )
+
+# Warn about insecure cookie settings.
+if not settings.cookie_https_only:
+    logger.warning(
+        "COOKIE_HTTPS_ONLY is disabled — session cookies will be sent over HTTP. "
+        "This is insecure and should only be used for local development."
     )

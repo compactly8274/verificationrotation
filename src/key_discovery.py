@@ -14,7 +14,13 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Sequence
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.crypto import encrypt_value, mask_value
+from src.models import DiscoveredKey
 
 logger = logging.getLogger("verificationrotation")
 
@@ -268,3 +274,90 @@ def discover_remote_keys(
         ))
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Storage helpers
+# ---------------------------------------------------------------------------
+
+def _dedupe_results(results: Sequence[DiscoveryResult]) -> list[DiscoveryResult]:
+    """Collapse multiple DiscoveryResults for the same (service_id, env_var).
+
+    Discovery can produce more than one result per pair when a key shows
+    up in multiple files (e.g. a compose file and an .env file). We keep
+    the LAST occurrence, which is what `discover_keys` would naturally
+    surface as the "most recently found" value.
+    """
+    by_pair: dict[tuple[str, str], DiscoveryResult] = {}
+    for r in results:
+        by_pair[(r.service_id, r.env_var)] = r
+    return list(by_pair.values())
+
+
+async def upsert_discovered_keys(
+    session: AsyncSession,
+    results: Sequence[DiscoveryResult],
+) -> list[dict]:
+    """Insert/update DiscoveredKey rows for each unique (service_id, env_var).
+
+    Behavior:
+    - Dedupes `results` by (service_id, env_var); last write wins.
+    - For each (service_id, env_var) pair, finds the existing row (if any).
+    - If an existing row has `applied_at` set (the user already applied
+      that key), the new value is NOT persisted and the existing row is
+      left untouched. Otherwise, the existing row is updated in place
+      (encrypted value, source_file, confidence, strategy) — preserving
+      the primary key and avoiding a delete/insert that would lose any
+      audit metadata.
+    - Returns a list of dicts mirroring the API response shape, with the
+      masked value rather than the plaintext.
+
+    The caller is responsible for committing the session.
+    """
+    deduped = _dedupe_results(results)
+    stored: list[dict] = []
+
+    for r in deduped:
+        existing = (await session.execute(
+            select(DiscoveredKey).where(
+                (DiscoveredKey.service_id == r.service_id)
+                & (DiscoveredKey.env_var == r.env_var)
+            )
+        )).scalar_one_or_none()
+
+        if existing is not None and existing.applied_at is not None:
+            # User already applied a discovered key for this pair. Don't
+            # clobber the applied row — the new value is just an
+            # observation; the user can clear+rediscover if they want a
+            # fresh row.
+            continue
+
+        encrypted = encrypt_value(r.value)
+        if existing is None:
+            existing = DiscoveredKey(
+                service_id=r.service_id,
+                env_var=r.env_var,
+                display_name=r.display_name,
+                value_encrypted=encrypted,
+                source_file=r.source_file,
+                confidence=r.confidence,
+                strategy=r.strategy,
+            )
+            session.add(existing)
+        else:
+            existing.value_encrypted = encrypted
+            existing.source_file = r.source_file
+            existing.confidence = r.confidence
+            existing.strategy = r.strategy
+
+        stored.append({
+            "service_id": r.service_id,
+            "env_var": r.env_var,
+            "display_name": r.display_name,
+            "value_masked": mask_value(r.value),
+            "source_file": r.source_file,
+            "confidence": r.confidence,
+            "strategy": r.strategy,
+        })
+
+    return stored
