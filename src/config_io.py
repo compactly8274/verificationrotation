@@ -212,3 +212,38 @@ def write_env_file(path: str, key: str, value: str) -> bool:
         return True
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------------------
+# XML  (ElementTree read, regex write to preserve formatting)
+# ---------------------------------------------------------------------------
+
+def read_xml(path: str, tag: str) -> Optional[str]:
+    """Read a text element from an XML file by tag name."""
+    try:
+        import xml.etree.ElementTree as ET
+        root = ET.parse(path).getroot()
+        el = root.find(f".//{tag}")
+        if el is not None and el.text:
+            return el.text.strip()
+        attr = root.get(tag)
+        return attr.strip() if attr else None
+    except Exception:
+        return None
+
+
+def write_xml(path: str, tag: str, value: str) -> bool:
+    """Replace an XML element's text value using regex to preserve formatting."""
+    try:
+        fp = Path(path)
+        if _check_symlink(fp):
+            return False
+        text = fp.read_text(errors="ignore")
+        pat = re.compile(rf'(<{re.escape(tag)}>)[^<]*(</{re.escape(tag)}>)')
+        updated, count = pat.subn(rf'\g<1>{value}\g<2>', text)
+        if not count:
+            return False
+        fp.write_text(updated)
+        return True
+    except Exception:
+        return False

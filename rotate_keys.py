@@ -368,7 +368,7 @@ def build_detected_fetcher(sig: dict, config_path: str) -> Optional[Callable[[],
 
     fmt = sig.get("format", "")
     try:
-        from src.config_io import read_env_file, read_ini, read_json, read_toml, read_yaml
+        from src.config_io import read_env_file, read_ini, read_json, read_toml, read_xml, read_yaml
     except ImportError:
         return None
 
@@ -383,6 +383,10 @@ def build_detected_fetcher(sig: dict, config_path: str) -> Optional[Callable[[],
             return read_toml(config_path, sig["toml_key"])
         if fmt == "env":
             return read_env_file(config_path, sig["env_key"])
+        if fmt == "arr_xml":
+            return read_xml(config_path, "ApiKey")
+        if fmt == "xml_tag":
+            return read_xml(config_path, sig.get("xml_tag", "ApiKey"))
         return None
 
     return _fetch
@@ -393,7 +397,7 @@ def build_detected_writer(sig: dict, config_path: str) -> Optional[Callable[[str
     fmt = sig.get("format", "")
     password_hash = sig.get("password_hash")
     try:
-        from src.config_io import write_env_file, write_ini, write_json, write_toml, write_yaml
+        from src.config_io import write_env_file, write_ini, write_json, write_toml, write_xml, write_yaml
     except ImportError:
         return None
 
@@ -422,6 +426,10 @@ def build_detected_writer(sig: dict, config_path: str) -> Optional[Callable[[str
             return write_toml(config_path, sig["toml_key"], stored)
         if fmt == "env":
             return write_env_file(config_path, sig["env_key"], stored)
+        if fmt == "arr_xml":
+            return write_xml(config_path, "ApiKey", stored)
+        if fmt == "xml_tag":
+            return write_xml(config_path, sig.get("xml_tag", "ApiKey"), stored)
         return False
 
     return _write
