@@ -77,6 +77,10 @@ class Settings(BaseSettings):
         alias="DISCOVERY_SKIP_DIRS",
     )
 
+    # Cross-repo sync with glaces-automated
+    sync_api_token: str = Field(default="", alias="SYNC_API_TOKEN")
+    glaces_ingest_url: str = Field(default="", alias="GLACES_INGEST_URL")
+
 
 settings = Settings()
 
