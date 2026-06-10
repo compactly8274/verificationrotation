@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from src.config import settings
 from src.services_registry import load_rotate_keys_config
 
 logger = logging.getLogger("verificationrotation")
@@ -203,9 +204,11 @@ def scan_dbs_for_keys(key_db_refs: dict[str, list]) -> dict[str, list[str]]:
 # ---------------------------------------------------------------------------
 
 def _ssh(host: str, user: str, cmd: str, timeout: int = 60, key_path: Optional[Path] = None, stdin_data: Optional[str] = None) -> tuple[int, str, str]:
+    known_hosts = str(settings.data_dir / "known_hosts")
     ssh_args = [
         "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
         "-o", "StrictHostKeyChecking=accept-new",
+        "-o", f"UserKnownHostsFile={known_hosts}",
     ]
     if key_path:
         ssh_args += ["-i", str(key_path)]
@@ -365,8 +368,10 @@ def build_scan_index(
     no_cache: bool = False,
     remote_hosts: Optional[list[dict]] = None,
     key_path: Optional[Path] = None,
+    config_path: Optional[Path] = None,
 ) -> ScanIndex:
-    search_dirs, search_exts, skip_dirs, yaml_hosts, _ = load_rotate_keys_config(Path("rotate_keys.yaml"))
+    config_path = config_path or Path("rotate_keys.yaml")
+    search_dirs, search_exts, skip_dirs, yaml_hosts, _ = load_rotate_keys_config(config_path)
     if remote_hosts is None:
         remote_hosts = yaml_hosts
 
@@ -405,11 +410,12 @@ def build_scan_index(
         for rh in remote_hosts:
             label = rh["label"]
             try:
+                rh_key_path = rh.get("key_path") or key_path
                 with _Spinner(f"Scanning {label} files ({rh['host']})"):
-                    rf = scan_remote_files_for_keys(rh["host"], rh["user"], rh["search_dirs"], search_exts, skip_dirs, old_keys, key_path=key_path)
+                    rf = scan_remote_files_for_keys(rh["host"], rh["user"], rh["search_dirs"], search_exts, skip_dirs, old_keys, key_path=rh_key_path)
                 print(f"  ✓ {label} file scan complete.", flush=True)
                 with _Spinner(f"Scanning {label} databases ({rh['host']})"):
-                    rd = scan_remote_dbs_for_keys(rh["host"], rh["user"], rh["db_refs"], old_keys, key_path=key_path)
+                    rd = scan_remote_dbs_for_keys(rh["host"], rh["user"], rh["db_refs"], old_keys, key_path=rh_key_path)
                 print(f"  ✓ {label} DB scan complete.", flush=True)
                 # Extract and remove error sentinels before storing
                 for d, tag in ((rf, "__scan_error__"), (rd, "__scan_error__")):

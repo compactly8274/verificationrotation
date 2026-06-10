@@ -9,6 +9,7 @@ from typing import Optional
 logger = logging.getLogger("verificationrotation")
 
 from src.config import settings
+from src.utils import validate_hostname, validate_ssh_key_name, validate_username
 
 
 def ensure_keys_dir() -> Path:
@@ -21,6 +22,7 @@ def ensure_keys_dir() -> Path:
 
 def generate_ssh_key(name: str) -> tuple[str, str]:
     """Generate a new ed25519 key pair. Returns (public_key, private_key_path)."""
+    validate_ssh_key_name(name)
     keys_dir = ensure_keys_dir()
     private_path = keys_dir / f"{name}"
     public_path = keys_dir / f"{name}.pub"
@@ -45,9 +47,15 @@ def get_ssh_key(name: str) -> Optional[Path]:
 
 def test_ssh_connection(key_name: str, user: str, host: str) -> tuple[bool, str]:
     """Test SSH connectivity using the named key. Returns (success, message)."""
+    try:
+        validate_hostname(host)
+        validate_username(user)
+    except ValueError as exc:
+        return False, str(exc)
     key_path = get_ssh_key(key_name)
     if not key_path:
         return False, "SSH key file not found — re-generate the key"
+    known_hosts = str(settings.data_dir / "known_hosts")
     try:
         result = subprocess.run(
             [
@@ -55,6 +63,7 @@ def test_ssh_connection(key_name: str, user: str, host: str) -> tuple[bool, str]
                 "-o", "BatchMode=yes",
                 "-o", "ConnectTimeout=10",
                 "-o", "StrictHostKeyChecking=accept-new",
+                "-o", f"UserKnownHostsFile={known_hosts}",
                 f"{user}@{host}",
                 "echo verificationrotation-ok",
             ],
