@@ -18,11 +18,19 @@ from typing import Optional
 
 logger = logging.getLogger("verificationrotation")
 
-_ENV_FILENAMES = {".env", "env", ".env.local", ".env.prod", ".env.production", ".env.example"}
+_ENV_FILENAMES = {
+    ".env", "env", ".env.local", ".env.prod", ".env.production", ".env.example",
+    ".env.development", ".env.staging", ".env.test", ".env.override",
+    "setupvars.conf", "miniflux.env", "paperless.conf", "docker-compose.env",
+    "nzbget.conf",
+}
 _COMPOSE_NAMES = {"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}
-_STRUCTURED_EXTS = {".json", ".yaml", ".yml", ".toml", ".ini", ".conf", ".cfg"}
-_MAX_FILE_BYTES = 2 * 1024 * 1024  # 2 MB
-_MAX_DEPTH = 6
+_STRUCTURED_EXTS = {
+    ".json", ".yaml", ".yml", ".toml", ".ini", ".conf", ".cfg", ".xml",
+}
+_XML_FILENAMES = {"config.xml", "serverconfig.xml"}
+_MAX_FILE_BYTES = 4 * 1024 * 1024  # 4 MB
+_MAX_DEPTH = 8
 
 
 @dataclass
@@ -52,6 +60,8 @@ def _extract_from_text(text: str, env_var: str) -> Optional[str]:
         rf'(?m)^[ \t]*{esc}[ \t]*:[ \t]*["\']?([^\s"\'\'#\n][^\s"\'\'#\n]*)',
         # "KEY": "value"  (JSON / YAML inline)
         rf'["\']?{esc}["\']?\s*:\s*["\']([^"\']+)["\']',
+        # <KEY>value</KEY>  (XML element)
+        rf'<{esc}>([^<]+)</{esc}>',
     ]
     for pat in patterns:
         m = re.search(pat, text, re.IGNORECASE)
@@ -104,6 +114,10 @@ def _parse_structured(fp: Path) -> Optional[object]:
             cp = configparser.ConfigParser()
             cp.read_string(text)
             return {s: dict(cp[s]) for s in cp.sections()}
+        if ext == ".xml":
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(text)
+            return {el.tag: el.text for el in root.iter() if el.text and el.text.strip()}
     except Exception as exc:
         logger.debug("Could not parse %s as %s: %s", fp.name, ext or "structured", exc)
     return None
@@ -195,6 +209,8 @@ def discover_keys(
 
                 if not (is_env or is_compose or is_structured):
                     continue
+                if ext == ".xml" and fname_lower not in {"config.xml", "serverconfig.xml"}:
+                    continue  # only parse XML files we know are small service configs
 
                 try:
                     if fp.stat().st_size > _MAX_FILE_BYTES:

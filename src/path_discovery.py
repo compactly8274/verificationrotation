@@ -17,7 +17,7 @@ from typing import Optional
 
 from src.app_signatures import APP_SIGNATURES
 
-MAX_DEPTH = 5
+MAX_DEPTH = 8
 
 # Directories that will never contain service appdata — skip them entirely
 _PRUNE = {
@@ -33,13 +33,14 @@ _PRUNE = {
 # Use chr(39) where a single-quote character is needed at runtime.
 _REMOTE_SCAN_PY = """\
 import sys, json, os, fnmatch, re, configparser
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 cfg = json.loads(sys.stdin.read())
 sigs = cfg["sigs"]
 search_dirs = cfg["search_dirs"]
 prune = set(cfg["prune"])
-MAX_DEPTH = 5
+MAX_DEPTH = 8
 found = {}
 
 for base in search_dirs:
@@ -89,7 +90,12 @@ for base in search_dirs:
                                     import yaml as _y
                                     obj = _y.safe_load(text)
                                     for k in sig.get("yaml_path", []):
-                                        obj = obj.get(k) if isinstance(obj, dict) else None
+                                        if isinstance(obj, dict):
+                                            obj = obj.get(k)
+                                        elif isinstance(obj, list) and isinstance(k, int):
+                                            obj = obj[k] if k < len(obj) else None
+                                        else:
+                                            obj = None
                                     if isinstance(obj, str):
                                         value = obj
                                 except ImportError:
@@ -104,6 +110,17 @@ for base in search_dirs:
                                 m = re.search(r"^" + re.escape(ekey) + r"\\s*=\\s*(.+)$", text, re.MULTILINE)
                                 if m:
                                     value = m.group(1).strip().strip(chr(34)).strip(chr(39))
+                            elif fmt == "arr_xml":
+                                root_el = ET.fromstring(text)
+                                el = root_el.find("ApiKey")
+                                if el is not None and el.text:
+                                    value = el.text.strip()
+                            elif fmt == "xml_tag":
+                                xtag = sig.get("xml_tag", "ApiKey")
+                                root_el = ET.fromstring(text)
+                                el = root_el.find(f".//{xtag}")
+                                if el is not None and el.text:
+                                    value = el.text.strip()
                         except Exception:
                             pass
                         found[sid] = {"path": str(cpath), "value": value}
@@ -176,7 +193,7 @@ def scan_remote_service_configs(
     _SAFE_FIELDS = {
         "dir_patterns", "config_file", "config_file_candidates",
         "format", "ini_section", "ini_key", "json_path",
-        "yaml_path", "toml_key", "env_key",
+        "yaml_path", "toml_key", "env_key", "xml_tag",
     }
     sigs_dict: dict[str, dict] = {
         sid: {k: v for k, v in sig.items() if k in _SAFE_FIELDS}
