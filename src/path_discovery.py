@@ -206,13 +206,22 @@ def scan_remote_service_configs(
         "prune": list(_PRUNE),
     })
 
+    import logging as _log
+    _logger = _log.getLogger(__name__)
+
     ssh_cmd = [
         "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
         "-o", "StrictHostKeyChecking=accept-new",
     ]
     if key_path:
         ssh_cmd += ["-i", key_path]
-    ssh_cmd += [f"{user}@{host}", f"python3 -c {shlex.quote(_REMOTE_SCAN_PY)}"]
+    # Prepend common paths so python3 is found even in minimal non-login shells
+    # (TrueNAS Scale, NixOS, and some other distros omit /usr/bin from SSH PATH).
+    inner = f"python3 -c {shlex.quote(_REMOTE_SCAN_PY)}"
+    ssh_cmd += [
+        f"{user}@{host}",
+        f"PATH=/usr/local/bin:/usr/bin:/bin:$PATH {inner}",
+    ]
 
     try:
         result = subprocess.run(
@@ -223,14 +232,24 @@ def scan_remote_service_configs(
             timeout=120,
         )
     except subprocess.TimeoutExpired:
+        _logger.warning("remote scan of %s@%s timed out", user, host)
         return {}
-    except Exception:
+    except Exception as exc:
+        _logger.warning("remote scan of %s@%s failed: %s", user, host, exc)
         return {}
 
     if result.returncode != 0:
+        _logger.warning(
+            "remote scan of %s@%s exited %d: %s",
+            user, host, result.returncode, result.stderr.strip()[:300],
+        )
         return {}
 
     try:
         return json.loads(result.stdout.strip())
-    except Exception:
+    except Exception as exc:
+        _logger.warning(
+            "remote scan of %s@%s: could not parse output: %s | stdout[:200]=%r",
+            user, host, exc, result.stdout[:200],
+        )
         return {}
