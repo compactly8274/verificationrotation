@@ -1560,15 +1560,16 @@ async def api_discover_keys(
     # Also scan remote hosts (SSH) for service config values
     db_hosts = await _get_db_hosts()
     for rh in db_hosts:
-        if not rh.get("search_dirs"):
-            continue
+        # Fall back to broad defaults when the user hasn't configured search dirs.
+        # /mnt covers TrueNAS Scale pools; /opt and /home cover typical Linux appdata.
+        rh_dirs = rh.get("search_dirs") or ["/mnt", "/opt", "/home"]
         rh_key = rh.get("key_path")
         try:
             remote_results = await asyncio.wait_for(
                 asyncio.get_running_loop().run_in_executor(
                     None,
-                    lambda h=rh, k=rh_key: discover_remote_keys(
-                        h["host"], h["user"], services, env, h["search_dirs"], key_path=k
+                    lambda h=rh, k=rh_key, d=rh_dirs: discover_remote_keys(
+                        h["host"], h["user"], services, env, d, key_path=k
                     ),
                 ),
                 timeout=min(settings.scan_timeout_minutes * 60, 120),
