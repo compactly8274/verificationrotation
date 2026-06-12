@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import queue
+import re
 import shlex
 import threading
 import time
@@ -36,7 +37,7 @@ from src.config import settings
 from src.crypto import decrypt_value, encrypt_value, mask_value
 from src.database import async_session, init_db
 from src.env_manager import read_env, write_env
-from src.key_discovery import discover_keys, upsert_discovered_keys
+from src.key_discovery import DiscoveryResult, discover_keys, discover_remote_keys, upsert_discovered_keys
 from src.models import DiscoveredKey, RemoteHost, RotationHistory, ScanLog, Service, SSHKey
 from src.notifications import send_notification
 from src.path_discovery import detect_service_paths
@@ -961,6 +962,13 @@ async def api_rotate(
                 ))
         await session.commit()
 
+    # Push new key to glaces-automated if the rotation succeeded and sync is configured
+    if ok and not dry_run and settings.glaces_ingest_url and settings.sync_api_token:
+        refreshed_env = read_env(settings.env_file)
+        new_val = new_value or refreshed_env.get(svc.env_var, "")
+        if new_val:
+            asyncio.create_task(_push_key_to_glaces(service_id, svc.env_var, new_val))
+
     return {"success": ok, "dry_run": dry_run, "log": rotation_output}
 
 
@@ -1549,6 +1557,30 @@ async def api_discover_keys(
         logger.error("discover-keys timed out after %d minutes", settings.scan_timeout_minutes)
         raise HTTPException(status_code=504, detail=f"Scan timed out after {settings.scan_timeout_minutes} minutes. Try narrowing DISCOVERY_SEARCH_DIRS.")
 
+    # Also scan remote hosts (SSH) for service config values
+    db_hosts = await _get_db_hosts()
+    for rh in db_hosts:
+        if not rh.get("search_dirs"):
+            continue
+        rh_key = rh.get("key_path")
+        try:
+            remote_results = await asyncio.wait_for(
+                asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda h=rh, k=rh_key: discover_remote_keys(
+                        h["host"], h["user"], services, env, h["search_dirs"], key_path=k
+                    ),
+                ),
+                timeout=min(settings.scan_timeout_minutes * 60, 120),
+            )
+            results.extend(remote_results)
+            if remote_results:
+                logger.info("discover-keys: %d result(s) from remote host %s", len(remote_results), rh["host"])
+        except asyncio.TimeoutError:
+            logger.warning("discover-keys: remote scan of %s timed out", rh.get("host", "?"))
+        except Exception as exc:
+            logger.warning("discover-keys: remote scan of %s failed: %s", rh.get("host", "?"), exc)
+
     async with async_session() as session:
         stored = await upsert_discovered_keys(session, results)
         await session.commit()
@@ -1773,6 +1805,136 @@ async def api_clear_discovered_keys(request: Request):
         await session.execute(sa_delete(DiscoveredKey))
         await session.commit()
     return {"success": True}
+
+
+# ---------------------------------------------------------------------------
+# API — Cross-repo sync with glaces-automated
+# ---------------------------------------------------------------------------
+
+def _check_sync_token(request: Request) -> None:
+    """Raise 401/503 if the request lacks a valid SYNC_API_TOKEN Bearer token."""
+    if not settings.sync_api_token:
+        raise HTTPException(status_code=503, detail="SYNC_API_TOKEN not configured on this server")
+    provided = request.headers.get("Authorization", "")
+    if provided.startswith("Bearer "):
+        provided = provided[7:]
+    if not hmac.compare_digest(settings.sync_api_token, provided):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+
+async def _push_key_to_glaces(service_id: str, env_var: str, value: str) -> None:
+    """Best-effort push of a rotated key to glaces-automated's ingest endpoint."""
+    import requests as _req
+    loop = asyncio.get_running_loop()
+    url = settings.glaces_ingest_url
+    token = settings.sync_api_token
+    def _post():
+        _req.post(
+            url,
+            json={"env_var": env_var, "value": value, "service": service_id},
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+    try:
+        await loop.run_in_executor(None, _post)
+        logger.info("sync: pushed %s to glaces-automated", env_var)
+    except Exception as exc:
+        logger.warning("sync: failed to push %s to glaces-automated: %s", env_var, exc)
+
+
+@app.post("/api/sync/ingest")
+@limiter.limit("60/minute")
+async def api_sync_ingest(request: Request):
+    """Receive a key discovered by glaces-automated and store it as a DiscoveredKey.
+
+    Expected JSON body:
+      {"service": "sonarr", "env_var": "SONARR_API_KEY", "current_key": "abc123...",
+       "config_path": "/mnt/.../config.xml", "display_name": "Sonarr"}
+
+    Requires Authorization: Bearer <SYNC_API_TOKEN>.
+    """
+    _check_sync_token(request)
+    body = await request.json()
+    service_id = str(body.get("service", "")).strip()
+    env_var = str(body.get("env_var", "")).strip()
+    display_name = str(body.get("display_name", service_id)).strip() or service_id
+    current_key = str(body.get("current_key", "")).strip()
+    config_path = str(body.get("config_path", "glaces-automated")).strip() or "glaces-automated"
+
+    if not service_id or not env_var or not current_key:
+        raise HTTPException(status_code=400, detail="service, env_var, and current_key are required")
+    if not re.match(r'^[A-Z][A-Z0-9_]{0,63}$', env_var):
+        raise HTTPException(status_code=422, detail="invalid env_var format")
+    if len(current_key) < 8:
+        raise HTTPException(status_code=422, detail="current_key too short (min 8 chars)")
+
+    result = DiscoveryResult(
+        service_id=service_id,
+        env_var=env_var,
+        display_name=display_name,
+        value=current_key,
+        source_file=config_path,
+        confidence="high",
+        strategy="remote_ingest",
+    )
+    async with async_session() as session:
+        stored = await upsert_discovered_keys(session, [result])
+        await session.commit()
+    return {"ok": True, "stored": len(stored)}
+
+
+@app.get("/api/sync/export")
+@limiter.limit("10/minute")
+async def api_sync_export(request: Request):
+    """Export current known key values for glaces-automated to ingest.
+
+    Returns both unapplied DiscoveredKey rows (encrypted in DB, decrypted here)
+    and keys currently live in .env, so glaces can stay in sync.
+
+    Requires Authorization: Bearer <SYNC_API_TOKEN>.
+    """
+    _check_sync_token(request)
+    env = read_env(settings.env_file)
+    result: list[dict] = []
+    seen_env_vars: set[str] = set()
+
+    async with async_session() as session:
+        dk_rows = (await session.execute(select(DiscoveredKey))).scalars().all()
+        svc_rows = (await session.execute(select(Service))).scalars().all()
+
+    for r in dk_rows:
+        try:
+            value = decrypt_value(r.value_encrypted)
+        except ValueError:
+            continue
+        result.append({
+            "service_id": r.service_id,
+            "env_var": r.env_var,
+            "display_name": r.display_name,
+            "current_key": value,
+            "source_file": r.source_file,
+            "confidence": r.confidence,
+            "strategy": r.strategy,
+        })
+        seen_env_vars.add(r.env_var)
+
+    # Also include any .env keys not already covered by discovered rows
+    for svc_row in svc_rows:
+        if not svc_row.env_var or svc_row.env_var in seen_env_vars:
+            continue
+        val = env.get(svc_row.env_var, "")
+        if val:
+            result.append({
+                "service_id": svc_row.id,
+                "env_var": svc_row.env_var,
+                "display_name": svc_row.display_name,
+                "current_key": val,
+                "source_file": str(settings.env_file),
+                "confidence": "high",
+                "strategy": "env_file",
+            })
+
+    return result
 
 
 @app.post("/api/admin/reencrypt")
