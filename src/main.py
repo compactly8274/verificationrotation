@@ -37,7 +37,7 @@ from src.config import settings
 from src.crypto import decrypt_value, encrypt_value, mask_value
 from src.database import async_session, init_db
 from src.env_manager import read_env, write_env
-from src.key_discovery import DiscoveryResult, discover_keys, upsert_discovered_keys
+from src.key_discovery import DiscoveryResult, discover_keys, discover_remote_keys, upsert_discovered_keys
 from src.models import DiscoveredKey, RemoteHost, RotationHistory, ScanLog, Service, SSHKey
 from src.notifications import send_notification
 from src.path_discovery import detect_service_paths
@@ -1556,6 +1556,30 @@ async def api_discover_keys(
     except asyncio.TimeoutError:
         logger.error("discover-keys timed out after %d minutes", settings.scan_timeout_minutes)
         raise HTTPException(status_code=504, detail=f"Scan timed out after {settings.scan_timeout_minutes} minutes. Try narrowing DISCOVERY_SEARCH_DIRS.")
+
+    # Also scan remote hosts (SSH) for service config values
+    db_hosts = await _get_db_hosts()
+    for rh in db_hosts:
+        if not rh.get("search_dirs"):
+            continue
+        rh_key = rh.get("key_path")
+        try:
+            remote_results = await asyncio.wait_for(
+                asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda h=rh, k=rh_key: discover_remote_keys(
+                        h["host"], h["user"], services, env, h["search_dirs"], key_path=k
+                    ),
+                ),
+                timeout=min(settings.scan_timeout_minutes * 60, 120),
+            )
+            results.extend(remote_results)
+            if remote_results:
+                logger.info("discover-keys: %d result(s) from remote host %s", len(remote_results), rh["host"])
+        except asyncio.TimeoutError:
+            logger.warning("discover-keys: remote scan of %s timed out", rh.get("host", "?"))
+        except Exception as exc:
+            logger.warning("discover-keys: remote scan of %s failed: %s", rh.get("host", "?"), exc)
 
     async with async_session() as session:
         stored = await upsert_discovered_keys(session, results)

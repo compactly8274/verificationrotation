@@ -230,6 +230,7 @@ sys.stdin.close()
 EXTS = set(data["exts"])
 SKIP = set(data["skip"])
 KEYS = data["keys"]
+MAX_DEPTH = data.get("max_depth", 8)
 PATS = {k: re.compile(r'(?<![A-Za-z0-9_\\-./])' + re.escape(k) + r'(?![A-Za-z0-9_\\-./])') for k in KEYS}
 index = {k: [] for k in KEYS}
 seen = {k: set() for k in KEYS}
@@ -239,8 +240,13 @@ def _skip_name(n):
     lo = n.lower()
     return lo.endswith(SKIP_SUFFIXES) or lo.startswith(SKIP_PREFIXES)
 for base in data["dirs"]:
+    base_depth = len(pathlib.Path(base).parts)
     for root, dirs, files in os.walk(base):
-        dirs[:] = [d for d in dirs if d not in SKIP]
+        depth = len(pathlib.Path(root).parts) - base_depth
+        if depth >= MAX_DEPTH:
+            dirs[:] = []
+            continue
+        dirs[:] = [d for d in dirs if d not in SKIP and not d.startswith(".")]
         for fn in files:
             if _skip_name(fn):
                 continue
@@ -261,7 +267,7 @@ for base in data["dirs"]:
                         index[k].append(s)
 print(json.dumps(index))
 """
-    stdin_data = json.dumps({"keys": active, "exts": list(search_exts), "skip": list(skip_dirs), "dirs": list(search_dirs)})
+    stdin_data = json.dumps({"keys": active, "exts": list(search_exts), "skip": list(skip_dirs), "dirs": list(search_dirs), "max_depth": 8})
     rc, out, err = _ssh(host, user, f"python3 -c {__import__('shlex').quote(py)}",
                         timeout=180, key_path=key_path, stdin_data=stdin_data)
     if rc != 0:
