@@ -193,7 +193,7 @@ def is_authenticated(request: Request) -> bool:
 
 def require_auth(request: Request):
     if not is_authenticated(request):
-        raise HTTPException(status_code=303, detail="/login")
+        raise HTTPException(status_code=401, detail="Not authenticated")
 
 
 def generate_csrf_token(request: Request) -> str:

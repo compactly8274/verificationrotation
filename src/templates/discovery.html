@@ -122,7 +122,7 @@ async function runDetection() {
 async function loadDetectedPaths() {
   const container = document.getElementById('detected-paths-container');
   try {
-    const res = await fetch('/api/detected-service-paths');
+    const res = await apiFetch('/api/detected-service-paths');
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       container.innerHTML = `<p style="color:var(--pico-del-color,#c0392b)">Error loading detected paths: ${escHtml(data.detail || res.statusText)}</p>`;
@@ -196,7 +196,7 @@ async function loadDiscoveredKeys() {
   const container = document.getElementById('discovered-container');
   container.innerHTML = '<article aria-busy="true"></article>';
   try {
-    const res = await fetch('/api/discovered-keys');
+    const res = await apiFetch('/api/discovered-keys');
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
       container.innerHTML = `<p style="color:var(--pico-del-color,#c0392b)">Error loading discovered keys: ${escHtml(data.detail || res.statusText)}</p>`;
