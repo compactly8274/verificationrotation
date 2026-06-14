@@ -298,7 +298,9 @@ async function clearDiscoveredKeys() {
   await loadDiscoveredKeys();
 }
 
-loadDetectedPaths();
-loadDiscoveredKeys();
+document.addEventListener('DOMContentLoaded', () => {
+  loadDetectedPaths();
+  loadDiscoveredKeys();
+});
 </script>
 {% endblock %}
