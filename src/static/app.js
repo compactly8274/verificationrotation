@@ -23,21 +23,35 @@ async function getCsrfToken() {
   return null;
 }
 
-// Wrapper for mutating requests that adds CSRF header
+// Wrapper for mutating requests that adds CSRF header.
+// Redirects to /login on 401 (session expired) so the user isn't left with
+// a confusing "Network error: TypeError: Load failed" from a redirect-with-no-Location.
 async function csrfFetch(url, options = {}) {
   const token = await getCsrfToken();
   if (token) {
     options.headers = options.headers || {};
     options.headers['X-CSRF-Token'] = token;
   }
-  return fetch(url, options);
+  const res = await fetch(url, options);
+  if (res.status === 401) {
+    window.location.href = '/login';
+    // Return a never-resolving promise so callers don't see a partial response.
+    return new Promise(() => {});
+  }
+  return res;
+}
+
+async function apiFetch(url, options = {}) {
+  const res = await fetch(url, options);
+  if (res.status === 401) { window.location.href = '/login'; return new Promise(() => {}); }
+  return res;
 }
 
 async function loadServices() {
   const container = document.getElementById('services-container');
   container.innerHTML = '<article aria-busy="true"></article>';
   try {
-    const res = await fetch('/api/services');
+    const res = await apiFetch('/api/services');
     const services = await res.json();
     renderServices(services);
   } catch (e) {
@@ -82,7 +96,7 @@ function renderServices(services) {
 
 async function loadScanStatus() {
   try {
-    const res = await fetch('/api/scan-status');
+    const res = await apiFetch('/api/scan-status');
     const data = await res.json();
     const badge = document.getElementById('scan-status-badge');
     const lastScan = document.getElementById('last-scan');
@@ -201,7 +215,7 @@ async function loadHosts() {
   if (!container) return;
   container.innerHTML = '<article aria-busy="true"></article>';
   try {
-    const res = await fetch('/api/hosts');
+    const res = await apiFetch('/api/hosts');
     const hosts = await res.json();
     renderHosts(hosts);
   } catch (e) {
@@ -378,7 +392,7 @@ async function loadSshKeys() {
   if (!container) return;
   container.innerHTML = '<article aria-busy="true"></article>';
   try {
-    const res = await fetch('/api/ssh-keys');
+    const res = await apiFetch('/api/ssh-keys');
     const keys = await res.json();
     renderSshKeys(keys);
   } catch (e) {
@@ -482,7 +496,7 @@ async function loadBwStatus() {
   const lockBtn = document.getElementById('btn-bw-lock');
   if (!badge) return;
   try {
-    const res = await fetch('/api/bitwarden/status');
+    const res = await apiFetch('/api/bitwarden/status');
     const data = await res.json();
     _bwLoginStatus = data.login_status || 'unauthenticated';
     const autoTag = data.auto_configured ? ' <small style="opacity:.6">(auto)</small>' : '';
