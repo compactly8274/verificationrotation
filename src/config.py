@@ -81,6 +81,12 @@ class Settings(BaseSettings):
     sync_api_token: str = Field(default="", alias="SYNC_API_TOKEN")
     glaces_ingest_url: str = Field(default="", alias="GLACES_INGEST_URL")
 
+    # Secrets export — written after every successful scan
+    export_secrets_path: str = Field(
+        default="/mnt/user/appdata/verrot/export/secrets.env",
+        alias="EXPORT_SECRETS_PATH",
+    )
+
 
 settings = Settings()
 

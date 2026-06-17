@@ -40,7 +40,7 @@ from src.env_manager import read_env, write_env
 from src.key_discovery import DiscoveryResult, discover_keys, discover_remote_keys, upsert_discovered_keys
 from src.models import DiscoveredKey, RemoteHost, RotationHistory, ScanLog, Service, SSHKey
 from src.notifications import send_notification
-from src.path_discovery import detect_service_paths
+from src.path_discovery import detect_service_paths, export_secrets_env
 from src.rotator import generate_password, is_password_service, rotate
 from src.scanner import ScanIndex, build_scan_index
 from src.services_registry import (
@@ -514,6 +514,23 @@ async def _background_scan():
                     )
                 )
                 await session.commit()
+
+            # Export live config values so downstream consumers (glaces-automated)
+            # can pick them up without running their own (often-broken) discovery.
+            try:
+                db_path = str(settings.data_dir / "verificationrotation.db")
+                exported = await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda: export_secrets_env(db_path, settings.export_secrets_path),
+                )
+                if exported:
+                    logger.info(
+                        "Exported %d service secrets to %s", exported, settings.export_secrets_path
+                    )
+            except Exception as _exc:
+                logger.warning(
+                    "secrets.env export failed (scan still counted as %s): %s", status, _exc
+                )
         except Exception as exc:
             errors = [str(exc)]
             async with async_session() as session:
