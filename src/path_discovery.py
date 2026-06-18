@@ -409,7 +409,7 @@ def export_secrets_env(db_path: str, output_path: str) -> int:
             fh.write("\n".join(lines) + "\n")
             fh.flush()
             os.fsync(fh.fileno())
-        tmp.chmod(0o644)
+        tmp.chmod(0o600)
         os.replace(str(tmp), str(out))
         _logger.info("export_secrets_env: wrote %d entries to %s", len(lines), output_path)
         return len(lines)
