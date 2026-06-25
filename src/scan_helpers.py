@@ -14,10 +14,12 @@ from typing import Pattern
 # CLI + web) import this. Updating it once propagates everywhere.
 BOUNDARY_PATTERN: str = r'(?<![A-Za-z0-9_\-./+:=?&%@]){}(?![A-Za-z0-9_\-./+:=?&%@])'
 
-# Inside f-string -> ssh "python3 -c <script>" -> literal regex string,
-# the backslashes are doubled so they survive the python -c round-trip.
-# (Embedded scripts use this variant.)
-BOUNDARY_PATTERN_ESCAPED: str = r'(?<![A-Za-z0-9_\\-./+:=?&%@]){}(?![A-Za-z0-9_\\-./+:=?&%@])'
+# Same as BOUNDARY_PATTERN. Both transport paths (json.dumps into the remote
+# walker's stdin, and shlex.quote() around the embedded -c <script>) preserve
+# backslashes verbatim, so no extra escaping is needed. The previous "\\-"
+# form was a malformed character range that crashed every remote scan with
+# `re.error: bad character range \-`.
+BOUNDARY_PATTERN_ESCAPED: str = BOUNDARY_PATTERN
 
 
 def key_pattern(key: str) -> Pattern:
