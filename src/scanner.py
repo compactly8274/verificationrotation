@@ -319,7 +319,7 @@ sys.stdin.close()
 DB_REFS = data["db_refs"]
 KEYS = data["keys"]
 _BOUNDARY_ESCAPED = data["boundary"]
-PATS = {{k: re.compile(_BOUNDARY_ESCAPED.format(re.escape(k))) for k in KEYS}}
+PATS = {k: re.compile(_BOUNDARY_ESCAPED.format(re.escape(k))) for k in KEYS}
 result = {k: [] for k in KEYS}
 for db_path, table, col in DB_REFS:
     dp = pathlib.Path(db_path)
