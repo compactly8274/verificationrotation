@@ -18,7 +18,7 @@ from typing import Optional
 
 from src.app_signatures import APP_SIGNATURES
 
-MAX_DEPTH = 8
+MAX_DEPTH = 10
 
 # Directories that will never contain service appdata — skip them entirely
 _PRUNE = {
@@ -53,7 +53,7 @@ cfg = json.loads(sys.stdin.read())
 sigs = cfg["sigs"]
 search_dirs = cfg["search_dirs"]
 prune = set(cfg["prune"])
-MAX_DEPTH = 8
+MAX_DEPTH = 10
 found = {}
 _BAK_KW = frozenset(["backup", "bak", "old", "config-backup"])
 def _is_bak(n):

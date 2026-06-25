@@ -19,12 +19,25 @@ Examples:
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 
+# Import the boundary regex from the single source of truth so this standalone
+# tool stays in sync with the main crawler. Falls back to a hardcoded copy if
+# the src package is unavailable (e.g. running from a stripped install).
+try:
+    from src.scan_helpers import BOUNDARY_PATTERN as _BOUNDARY
+except ImportError:
+    _BOUNDARY = r'(?<![A-Za-z0-9_\-./+:=?&%@]){}(?![A-Za-z0-9_\-./+:=?&%@])'
+
+# Default search dirs / extensions / skip dirs when rotate_keys.yaml is not available.
 SEARCH_DIRS = [
     "/mnt/user/appdata",
     "/mnt/user/data",
+    "/mnt/Data",
+    "/mnt/tank",
+    "/mnt/Dozer",
     "/boot/config",
 ]
 
@@ -36,10 +49,30 @@ SEARCH_EXTENSIONS = {
 SKIP_DIRS = {
     "logs", "log", "cache", "Cache", "Backups", "backup",
     "MediaCover", "metadata", ".git",
+    ".trash", ".Recycle.Bin", "lost+found", "System Volume Information",
 }
 
+def _try_load_yaml_config() -> tuple[list[str], set[str], set[str]] | None:
+    """If a rotate_keys.yaml exists next to this script, load search/dir config from it."""
+    yaml_path = Path(__file__).resolve().parent / "rotate_keys.yaml"
+    if not yaml_path.exists():
+        return None
+    try:
+        from src.services_registry import load_rotate_keys_config
+    except Exception:
+        return None
+    try:
+        search_dirs, search_exts, skip_dirs, _remote_hosts, _services = load_rotate_keys_config(yaml_path)
+        return list(search_dirs), set(search_exts), set(skip_dirs)
+    except Exception:
+        return None
 
-def search(key: str, dirs: list[str]) -> list[tuple[str, int, str]]:
+
+def _key_pattern(key: str) -> re.Pattern:
+    return re.compile(_BOUNDARY.format(re.escape(key)))
+
+
+def search(key: str, dirs: list[str], exts: set[str], skip: set[str]) -> list[tuple[str, int, str]]:
     hits = []
     for base in dirs:
         base_path = Path(base)
@@ -47,28 +80,31 @@ def search(key: str, dirs: list[str]) -> list[tuple[str, int, str]]:
             continue
         for root, dirnames, filenames in os.walk(base_path):
             # Prune skip dirs in-place so os.walk doesn't descend into them
-            dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+            dirnames[:] = [d for d in dirnames if d not in skip]
             for filename in filenames:
-                if Path(filename).suffix.lower() not in SEARCH_EXTENSIONS:
+                if Path(filename).suffix.lower() not in exts:
                     continue
                 filepath = Path(root) / filename
                 try:
                     text = filepath.read_text(errors="ignore")
-                    if key in text:
-                        for lineno, line in enumerate(text.splitlines(), 1):
-                            if key in line:
-                                hits.append((str(filepath), lineno, line.strip()))
                 except (PermissionError, OSError):
                     continue
+                pat = _key_pattern(key)
+                for lineno, line in enumerate(text.splitlines(), 1):
+                    if pat.search(line):
+                        hits.append((str(filepath), lineno, line.strip()))
     return hits
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Find old API key references in config files")
-    parser.add_argument("--dirs", nargs="+", default=SEARCH_DIRS,
-                        help="Directories to search (default: Unraid appdata paths)")
+    parser.add_argument("--dirs", nargs="+", default=None,
+                        help="Directories to search (default: rotate_keys.yaml search_dirs, "
+                             "or fallback Unraid appdata paths)")
     parser.add_argument("--key", help="Key value to search for (prompted if omitted)")
     parser.add_argument("--key-file", type=Path, help="File containing the key value to search for")
+    parser.add_argument("--no-yaml", action="store_true",
+                        help="Ignore rotate_keys.yaml and use built-in defaults")
     args = parser.parse_args()
 
     if args.key:
@@ -78,7 +114,15 @@ def main() -> None:
             file=sys.stderr,
         )
 
-    print(f"Searching: {', '.join(args.dirs)}")
+    yaml_cfg = None if args.no_yaml else _try_load_yaml_config()
+    if yaml_cfg is not None:
+        default_dirs, default_exts, default_skip = yaml_cfg
+        print("(using rotate_keys.yaml search_dirs / search_exts / skip_dirs)")
+    else:
+        default_dirs, default_exts, default_skip = SEARCH_DIRS, SEARCH_EXTENSIONS, SKIP_DIRS
+
+    dirs = args.dirs if args.dirs is not None else default_dirs
+    print(f"Searching: {', '.join(dirs)}")
     print()
 
     key = args.key
@@ -101,15 +145,21 @@ def main() -> None:
             key = None
             continue
 
-        hits = search(key, args.dirs)
+        hits = search(key, dirs, default_exts, default_skip)
 
         if not hits:
             print(f"  ✓ No references found — safe to rotate\n")
         else:
-            print(f"  Found {len(hits)} reference(s):")
+            unique_files = {fp for fp, _ln, _line in hits}
+            print(f"  Found {len(hits)} reference(s) across {len(unique_files)} unique file(s):")
+            seen = set()
             for filepath, lineno, line in hits:
                 # Redact the key in display output so it doesn't linger on screen
                 display_line = line.replace(key, "***REDACTED***")
+                tag = (filepath, lineno)
+                if tag in seen:
+                    continue
+                seen.add(tag)
                 print(f"    {filepath}:{lineno}")
                 print(f"      {display_line}")
             print()

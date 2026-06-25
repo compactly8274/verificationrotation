@@ -49,9 +49,32 @@ try:
     from src.path_discovery import detect_service_paths, scan_remote_service_configs
     from src.key_discovery import discover_keys, discover_remote_keys, DiscoveryResult
     from src.app_signatures import APP_SIGNATURES
+    from src.scan_helpers import (
+        BOUNDARY_PATTERN_ESCAPED as _BOUNDARY_ESCAPED,
+        SKIP_NAME_SUFFIXES as _SKIP_NAME_SUFFIXES,
+        SKIP_NAME_PREFIXES as _SKIP_NAME_PREFIXES,
+        key_pattern as _key_pattern,
+        key_matches as _key_matches,
+        should_skip_file as _should_skip_file,
+    )
     _AUTO_DISCOVER_AVAILABLE = True
 except ImportError:
     _AUTO_DISCOVER_AVAILABLE = False
+    # Fallback to local copies if src.scan_helpers can't be imported. These
+    # MUST stay in sync with src/scan_helpers.py — drift caused the original
+    # boundary-regex bug. If you edit one, edit both.
+    _BOUNDARY = r'(?<![A-Za-z0-9_\-./+:=?&%@]){}(?![A-Za-z0-9_\-./+:=?&%@])'
+    _BOUNDARY_ESCAPED = r'(?<![A-Za-z0-9_\-./+:=?&%@]){}(?![A-Za-z0-9_\-./+:=?&%@])'
+    _SKIP_NAME_SUFFIXES = (".bak", ".tmp", ".backup", ".old", ".orig", ".swp", "~")
+    _SKIP_NAME_PREFIXES = ("readme.", "changelog.", ".#")
+    def _key_pattern(key):
+        import re
+        return re.compile(_BOUNDARY.format(re.escape(key)))
+    def _key_matches(key, text):
+        return bool(_key_pattern(key).search(text))
+    def _should_skip_file(name):
+        lo = name.lower()
+        return lo.endswith(_SKIP_NAME_SUFFIXES) or lo.startswith(_SKIP_NAME_PREFIXES)
 
 # ---------------------------------------------------------------------------
 # Service definition
@@ -609,21 +632,25 @@ def _ssh(host: str, user: str, cmd: str, timeout: int = 60) -> tuple[int, str, s
     return result.returncode, result.stdout.strip(), result.stderr.strip()
 
 
-def scan_remote_files_for_keys(host: str, user: str, search_dirs: list, keys: set[str]) -> dict[str, list[str]]:
-    """Single SSH call — scan remote files for all keys at once."""
+def scan_remote_files_for_keys(host: str, user: str, search_dirs: list, keys: set[str]) -> tuple[dict[str, list[str]], Optional[str]]:
+    """Single SSH call — scan remote files for all keys at once.
+
+    Returns (result_dict, error_msg_or_None). On SSH failure, result_dict is
+    a flat {key: []} and error_msg is the failure reason for the caller to log.
+    """
     active = [k for k in keys if k]
     if not active:
-        return {}
+        return {}, None
     py = f"""
 import os, pathlib, json, re
 EXTS = {set(SEARCH_EXTS)!r}
 SKIP = {SKIP_DIRS!r}
 KEYS = {active!r}
-PATS = {{k: re.compile(r'(?<![A-Za-z0-9_\\-./])' + re.escape(k) + r'(?![A-Za-z0-9_\\-./])') for k in KEYS}}
+PATS = {{k: re.compile({_BOUNDARY_ESCAPED!r}.format(re.escape(k))) for k in KEYS}}
 index = {{k: [] for k in KEYS}}
 seen = {{k: set() for k in KEYS}}
-SKIP_SUFFIXES = (".bak", ".tmp", ".backup", ".old", ".orig", ".swp", "~")
-SKIP_PREFIXES = ("readme", "changelog", "license", "copying", ".#")
+SKIP_SUFFIXES = {_SKIP_NAME_SUFFIXES!r}
+SKIP_PREFIXES = {_SKIP_NAME_PREFIXES!r}
 def _skip_name(n):
     lo = n.lower()
     return lo.endswith(SKIP_SUFFIXES) or lo.startswith(SKIP_PREFIXES)
@@ -652,12 +679,15 @@ print(json.dumps(index))
 """
     rc, out, err = _ssh(host, user, f"python3 -c {shlex.quote(py)}", timeout=180)
     if rc != 0:
-        print(f"  WARNING: remote file scan on {host} failed: {err or 'ssh error'}")
-        return {k: [] for k in active}
+        msg = err or "ssh error"
+        print(f"  WARNING: remote file scan on {host} failed: {msg}")
+        return {k: [] for k in active}, msg
     try:
-        return json.loads(out)
-    except Exception:
-        return {k: [] for k in active}
+        return json.loads(out), None
+    except Exception as exc:
+        msg = f"invalid JSON response — {exc}"
+        print(f"  WARNING: remote file scan on {host} failed: {msg}")
+        return {k: [] for k in active}, msg
 
 
 def replace_in_remote_files(host: str, user: str, old: str, new: str, filepaths: list) -> list[str]:
@@ -667,7 +697,8 @@ def replace_in_remote_files(host: str, user: str, old: str, new: str, filepaths:
 import shutil, pathlib, re
 OLD = {old!r}
 NEW = {new!r}
-PAT = re.compile(r'(?<![A-Za-z0-9_\\-./])' + re.escape(OLD) + r'(?![A-Za-z0-9_\\-./])')
+_BOUNDARY_ESCAPED = {_BOUNDARY_ESCAPED!r}
+PAT = re.compile(_BOUNDARY_ESCAPED.format(re.escape(OLD)))
 for fp_str in {filepaths!r}:
     fp = pathlib.Path(fp_str)
     try:
@@ -687,16 +718,21 @@ for fp_str in {filepaths!r}:
     return [l for l in out.splitlines() if l and not l.startswith("WARNING")]
 
 
-def scan_remote_dbs_for_keys(host: str, user: str, db_refs: list, keys: set[str]) -> dict[str, list[str]]:
-    """Single SSH call — scan remote DBs for all keys at once."""
+def scan_remote_dbs_for_keys(host: str, user: str, db_refs: list, keys: set[str]) -> tuple[dict[str, list[str]], Optional[str]]:
+    """Single SSH call — scan remote DBs for all keys at once.
+
+    Returns (result_dict, error_msg_or_None). On SSH failure, result_dict is
+    a flat {key: []} and error_msg is the failure reason for the caller to log.
+    """
     active = [k for k in keys if k]
     if not active or not db_refs:
-        return {k: [] for k in active}
+        return {k: [] for k in active}, None
     py = f"""
 import sqlite3, pathlib, json, re
 DB_REFS = {db_refs!r}
 KEYS = {active!r}
-PATS = {{k: re.compile(r'(?<![A-Za-z0-9_\\-./])' + re.escape(k) + r'(?![A-Za-z0-9_\\-./])') for k in KEYS}}
+_BOUNDARY_ESCAPED = {_BOUNDARY_ESCAPED!r}
+PATS = {{k: re.compile(_BOUNDARY_ESCAPED.format(re.escape(k))) for k in KEYS}}
 result = {{k: [] for k in KEYS}}
 for db_path, table, col in DB_REFS:
     dp = pathlib.Path(db_path)
@@ -720,12 +756,15 @@ print(json.dumps(result))
 """
     rc, out, err = _ssh(host, user, f"python3 -c {shlex.quote(py)}", timeout=60)
     if rc != 0:
-        print(f"  WARNING: remote DB scan on {host} failed: {err or 'ssh error'}")
-        return {k: [] for k in active}
+        msg = err or "ssh error"
+        print(f"  WARNING: remote DB scan on {host} failed: {msg}")
+        return {k: [] for k in active}, msg
     try:
-        return json.loads(out)
-    except Exception:
-        return {k: [] for k in active}
+        return json.loads(out), None
+    except Exception as exc:
+        msg = f"invalid JSON response — {exc}"
+        print(f"  WARNING: remote DB scan on {host} failed: {msg}")
+        return {k: [] for k in active}, msg
 
 
 def replace_in_remote_dbs(host: str, user: str, old: str, new: str, db_refs: list) -> list[str]:
@@ -735,7 +774,8 @@ def replace_in_remote_dbs(host: str, user: str, old: str, new: str, db_refs: lis
 import sqlite3, shutil, pathlib, re
 OLD = {old!r}
 NEW = {new!r}
-PAT = re.compile(r'(?<![A-Za-z0-9_\\-./])' + re.escape(OLD) + r'(?![A-Za-z0-9_\\-./])')
+_BOUNDARY_ESCAPED = {_BOUNDARY_ESCAPED!r}
+PAT = re.compile(_BOUNDARY_ESCAPED.format(re.escape(OLD)))
 seen = set()
 for db_path, table, col in {db_refs!r}:
     key = (db_path, table, col)
@@ -853,33 +893,14 @@ def _key_hash(key: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Exact-match helpers
+# Exact-match helpers — re-exports from src.scan_helpers for backward compat
+# (legacy callers in this module and other scripts use _key_pattern / _key_matches)
 # ---------------------------------------------------------------------------
-_BOUNDARY = r'(?<![A-Za-z0-9_\-./]){}(?![A-Za-z0-9_\-./])'
 
-
-def _key_pattern(key: str) -> re.Pattern:
-    return re.compile(_BOUNDARY.format(re.escape(key)))
-
-
-def _key_matches(key: str, text: str) -> bool:
-    return bool(_key_pattern(key).search(text))
 
 
 def _key_replace(old: str, new: str, text: str) -> str:
     return _key_pattern(old).sub(lambda _: new, text)
-
-
-_SKIP_NAME_SUFFIXES = (".bak", ".tmp", ".backup", ".old", ".orig", ".swp", "~")
-_SKIP_NAME_PREFIXES = ("readme", "changelog", "license", "copying", ".#")
-
-def _should_skip_file(name: str) -> bool:
-    lo = name.lower()
-    if lo.endswith(_SKIP_NAME_SUFFIXES):
-        return True
-    if lo.startswith(_SKIP_NAME_PREFIXES):
-        return True
-    return False
 
 
 # ---------------------------------------------------------------------------
@@ -986,19 +1007,22 @@ def log_audit(
 # Search helpers
 # ---------------------------------------------------------------------------
 
-def scan_files_for_keys(keys: set[str], env_path: Optional[Path] = None) -> dict[str, list[str]]:
-    """Walk filesystem ONCE, return {key: [files]} for all keys simultaneously."""
+def scan_files_for_keys(keys: set[str], env_path: Optional[Path] = None, follow_symlinks: bool = False) -> tuple[dict[str, list[str]], dict[str, dict[str, list[int]]]]:
+    """Walk filesystem ONCE, return ({key: [paths]}, {key: {path: [line_numbers]}})."""
     active = {k for k in keys if k}
     index: dict[str, list[str]] = {k: [] for k in active}
     seen: dict[str, set[str]] = {k: set() for k in active}
-    checked = hits = 0
+    lines_index: dict[str, dict[str, list[int]]] = {k: {} for k in active}
+    # Precompile one regex per key — reused for every file. Big perf win on large trees.
+    pats: dict[str, "re.Pattern"] = {k: _key_pattern(k) for k in active}
+    checked = hits = skipped_large = 0
     frames = itertools.cycle("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
     env_abs = env_path.resolve() if env_path else None
     for base in SEARCH_DIRS:
         bp = Path(base)
         if not bp.exists():
             continue
-        for root, dirnames, filenames in os.walk(bp):
+        for root, dirnames, filenames in os.walk(bp, followlinks=follow_symlinks):
             dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
             for fn in filenames:
                 if _should_skip_file(fn):
@@ -1010,25 +1034,36 @@ def scan_files_for_keys(keys: set[str], env_path: Optional[Path] = None) -> dict
                     continue
                 try:
                     if fp.stat().st_size > 2_000_000:
+                        skipped_large += 1
+                        if skipped_large <= 5:
+                            print(f"  ⚠ Skipping large file ({fp.stat().st_size/1_000_000:.1f} MB): {fp}", flush=True)
                         continue
                     text = fp.read_text(errors="ignore")
                 except (PermissionError, OSError):
                     continue
                 checked += 1
-                for key in active:
-                    if _key_matches(key, text):
-                        sp = str(fp)
-                        if sp not in seen[key]:
-                            seen[key].add(sp)
-                            index[key].append(sp)
-                            hits += 1
+                sp = str(fp)
+                file_line_hits: dict[str, list[int]] = {k: [] for k in active}
+                for lineno, line in enumerate(text.splitlines(), 1):
+                    for key, pat in pats.items():
+                        if pat.search(line):
+                            file_line_hits[key].append(lineno)
+                for key, line_list in file_line_hits.items():
+                    if line_list and sp not in seen[key]:
+                        seen[key].add(sp)
+                        index[key].append(sp)
+                        lines_index[key][sp] = line_list
+                        hits += 1
                 if checked % 100 == 0:
                     bar_done = min(checked // 200, 20)
                     bar = "█" * bar_done + "░" * (20 - bar_done)
                     print(f"  {next(frames)} [{bar}] {checked:,} files, {hits} hit(s)",
                           end="\r", flush=True)
-    print(f"  ✓ Local scan complete — {checked:,} files, {hits} hit(s)        ", flush=True)
-    return index
+    summary = f"  ✓ Local scan complete — {checked:,} files, {hits} hit(s)"
+    if skipped_large:
+        summary += f"  ({skipped_large} file(s) skipped for being > 2 MB)"
+    print(summary + "        ", flush=True)
+    return index, lines_index
 
 
 def replace_in_files(old: str, new: str, filepaths: list[str]) -> list[str]:
@@ -1120,6 +1155,8 @@ def save_scan_cache(index: "ScanIndex", keys: set[str], path: Path) -> None:
             "local_dbs": index.local_dbs,
             "remote_files": index.remote_files,
             "remote_dbs": index.remote_dbs,
+            "local_files_lines": getattr(index, "local_files_lines", {}),
+            "remote_files_lines": getattr(index, "remote_files_lines", {}),
         }
         path.write_text(json.dumps(payload, indent=2))
     except OSError:
@@ -1141,6 +1178,8 @@ def load_scan_cache(keys: set[str], path: Path, max_age_hours: float) -> "Option
         local_dbs=data["local_dbs"],
         remote_files=data["remote_files"],
         remote_dbs=data["remote_dbs"],
+        local_files_lines=data.get("local_files_lines", {}),
+        remote_files_lines=data.get("remote_files_lines", {}),
     )
 
 
@@ -1179,6 +1218,19 @@ class ScanIndex:
     local_dbs:    dict[str, list[str]]                    # key → [db hit strings]
     remote_files: dict[str, dict[str, list[str]]]         # label → key → [remote paths]
     remote_dbs:   dict[str, dict[str, list[str]]]         # label → key → [db hit strings]
+    # Optional: parallel line-number indexes for the web UI display.
+    # key → {path: [line_numbers]}
+    local_files_lines:  dict[str, dict[str, list[int]]] = None  # type: ignore[assignment]
+    remote_files_lines: dict[str, dict[str, dict[str, list[int]]]] = None  # type: ignore[assignment]
+    scan_errors: list[str] = None  # type: ignore[assignment]
+
+    def __post_init__(self):
+        if self.local_files_lines is None:
+            self.local_files_lines = {}
+        if self.remote_files_lines is None:
+            self.remote_files_lines = {}
+        if self.scan_errors is None:
+            self.scan_errors = []
 
 
 def build_scan_index(
@@ -1187,10 +1239,20 @@ def build_scan_index(
     env_path: Optional[Path] = None,
     skip_remote: bool = False,
     cache_path: Optional[Path] = None,
-    cache_max_age: float = 4.0,
+    cache_max_age: Optional[float] = None,
     no_cache: bool = False,
+    follow_symlinks: bool = False,
 ) -> ScanIndex:
     """Walk the filesystem and all DBs ONCE for every active old key."""
+    # Fall back to CACHE_MAX_AGE_HOURS env var (set via .env or container env) when
+    # the caller doesn't pass an explicit value. Lets ops control cache freshness
+    # without changing CLI flags.
+    if cache_max_age is None:
+        try:
+            from src.config import settings as _settings
+            cache_max_age = _settings.cache_max_age_hours
+        except Exception:
+            cache_max_age = 4.0
     old_keys: set[str] = set()
     key_db_refs: dict[str, list] = {}
     for svc in services.values():
@@ -1218,29 +1280,36 @@ def build_scan_index(
     print(f"\n  Scanning for {len(old_keys)} key(s) — runs once, then cached for "
           f"{cache_max_age:.0f}h.")
 
-    local_files = scan_files_for_keys(old_keys, env_path=env_path)
+    local_files, local_files_lines = scan_files_for_keys(old_keys, env_path=env_path, follow_symlinks=follow_symlinks)
     local_dbs   = scan_dbs_for_keys(key_db_refs) if key_db_refs else {k: [] for k in old_keys}
 
     remote_files: dict[str, dict[str, list[str]]] = {}
     remote_dbs:   dict[str, dict[str, list[str]]] = {}
+    scan_errors: list[str] = []
     if not skip_remote:
         for rh in REMOTE_HOSTS:
             label = rh["label"]
             try:
                 with _Spinner(f"Scanning {label} files ({rh['host']})"):
-                    rf = scan_remote_files_for_keys(
+                    rf, ferr = scan_remote_files_for_keys(
                         rh["host"], rh["user"], rh["search_dirs"], old_keys
                     )
                 print(f"  ✓ {label} file scan complete.", flush=True)
                 with _Spinner(f"Scanning {label} databases ({rh['host']})"):
-                    rd = scan_remote_dbs_for_keys(
+                    rd, derr = scan_remote_dbs_for_keys(
                         rh["host"], rh["user"], rh["db_refs"], old_keys
                     )
                 print(f"  ✓ {label} DB scan complete.", flush=True)
                 remote_files[label] = rf
                 remote_dbs[label]   = rd
+                if ferr:
+                    scan_errors.append(f"{label} ({rh['host']}): {ferr}")
+                if derr:
+                    scan_errors.append(f"{label} ({rh['host']}): {derr}")
             except subprocess.TimeoutExpired:
+                msg = f"{label} ({rh['host']}): timed out"
                 print(f"  ✗ {label} timed out — skipping. Use --skip-remote to avoid this.")
+                scan_errors.append(msg)
                 remote_files[label] = {k: [] for k in old_keys}
                 remote_dbs[label]   = {k: [] for k in old_keys}
     else:
@@ -1249,7 +1318,14 @@ def build_scan_index(
     index = ScanIndex(local_files, local_dbs, remote_files, remote_dbs)
     save_scan_cache(index, old_keys, cp)
     total = sum(len(v) for v in local_files.values())
-    print(f"\n  Index ready — {total} local hit(s). Results cached to {cp}\n")
+    print(f"\n  Index ready — {total} local hit(s). Results cached to {cp}")
+    if scan_errors:
+        print()
+        print("  ⚠ Remote scan issues:")
+        for err in scan_errors:
+            print(f"    - {err}")
+        print("  Pass --skip-remote to silence, or fix SSH access on the affected host(s).")
+    print()
     return index
 
 
@@ -1539,10 +1615,15 @@ def main() -> None:
     parser.add_argument("--list", action="store_true", help="List all service IDs and exit")
     parser.add_argument("--skip-remote", action="store_true",
                         help="Skip SSH scan of remote hosts (TrueNAS etc.)")
+    parser.add_argument("--follow-symlinks", action="store_true",
+                        help="Follow symlinks while walking the filesystem. "
+                             "Useful for Unraid setups where appdata is symlinked "
+                             "to a separate share. May cause loops if not careful.")
     parser.add_argument("--no-cache", action="store_true",
                         help="Ignore cached scan results and rescan from scratch")
-    parser.add_argument("--cache-max-age", type=float, default=4.0, metavar="HOURS",
-                        help="Max age of cached scan results in hours (default: 4)")
+    parser.add_argument("--cache-max-age", type=float, default=None, metavar="HOURS",
+                        help="Max age of cached scan results in hours "
+                             "(default: 4, or CACHE_MAX_AGE_HOURS env var)")
     parser.add_argument("--clear-state", action="store_true",
                         help="Remove any saved rotation state and exit")
     parser.add_argument("--dry-run", action="store_true",
@@ -1643,6 +1724,7 @@ def main() -> None:
         skip_remote=args.skip_remote,
         no_cache=args.no_cache,
         cache_max_age=args.cache_max_age,
+        follow_symlinks=args.follow_symlinks,
     )
 
     if args.service:

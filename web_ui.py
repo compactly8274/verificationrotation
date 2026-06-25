@@ -249,8 +249,10 @@ def api_scan():
                     for sid, svc in SERVICES.items():
                         if svc.env_var and env.get(svc.env_var) == key:
                             for f in files:
+                                lines = idx.local_files_lines.get(key, {}).get(f, [])
                                 hits.append({"sid": sid, "name": svc.display_name,
-                                             "path": f, "type": "file", "host": "local"})
+                                             "path": f, "type": "file",
+                                             "lines": lines, "host": "local"})
                 for key, dbs in idx.local_dbs.items():
                     for sid, svc in SERVICES.items():
                         if svc.env_var and env.get(svc.env_var) == key:
@@ -262,8 +264,10 @@ def api_scan():
                         for sid, svc in SERVICES.items():
                             if svc.env_var and env.get(svc.env_var) == key:
                                 for f in files:
+                                    lines = idx.remote_files_lines.get(label, {}).get(key, {}).get(f, [])
                                     hits.append({"sid": sid, "name": svc.display_name,
-                                                 "path": f, "type": "file", "host": label})
+                                                 "path": f, "type": "file",
+                                                 "lines": lines, "host": label})
                 for label, km in idx.remote_dbs.items():
                     for key, dbs in km.items():
                         for sid, svc in SERVICES.items():
@@ -607,7 +611,7 @@ function appendLog(el, text, forceClass) {
   if (forceClass) { d.className = forceClass; }
   else if (t.startsWith('✓') || t.startsWith('Done') || t.toLowerCase().includes('complete'))
     d.className = 'lok';
-  else if (t.startsWith('WARNING') || t.startsWith('[dry-run]'))
+  else if (t.startsWith('WARNING') || t.startsWith('⚠') || t.startsWith('[dry-run]'))
     d.className = 'lwarn';
   else if (t.startsWith('ERROR') || t.startsWith('✗'))
     d.className = 'lerr';
@@ -841,14 +845,18 @@ function runScan() {
     if (hits.length) {
       const byS = {};
       hits.forEach(h => { if (!byS[h.sid]) byS[h.sid] = {name: h.name, hits: []}; byS[h.sid].hits.push(h); });
-      let html = '<table class="tbl"><thead><tr><th>Service</th><th>Type</th><th>Host</th><th>Path</th></tr></thead><tbody>';
+      let html = '<table class="tbl"><thead><tr><th>Service</th><th>Type</th><th>Host</th><th>Path</th><th>Lines</th></tr></thead><tbody>';
       Object.values(byS).forEach(g => {
         g.hits.forEach((h, i) => {
+          const linesStr = h.lines && h.lines.length
+            ? h.lines.slice(0, 5).join(', ') + (h.lines.length > 5 ? '…' : '')
+            : '';
           html += '<tr>' +
             (i === 0 ? '<td rowspan="' + g.hits.length + '" style="font-weight:500">' + esc(g.name) + '</td>' : '') +
             '<td><span class="badge ' + (h.type === 'file' ? 'bblue' : 'byellow') + '">' + h.type + '</span></td>' +
             '<td>' + esc(h.host) + '</td>' +
-            '<td style="font-family:monospace;font-size:12px">' + esc(h.path) + '</td></tr>';
+            '<td style="font-family:monospace;font-size:12px">' + esc(h.path) + '</td>' +
+            '<td style="font-family:monospace;font-size:11px;color:var(--text2)">' + esc(linesStr) + '</td></tr>';
         });
       });
       html += '</tbody></table>';

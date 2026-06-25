@@ -6,6 +6,9 @@
 # ---------------------------------------------------------------------------
 search_dirs:
   - /mnt/user/appdata
+  - /mnt/user/data
+  - /mnt/tank
+  - /mnt/Dozer
   - /boot/config
 
 search_exts:
@@ -49,6 +52,10 @@ skip_dirs:
   - music
   - photos
   - downloads
+  - .trash
+  - .Recycle.Bin
+  - lost+found
+  - System Volume Information
 
 # ---------------------------------------------------------------------------
 # Remote hosts to also search/replace (SSH key auth required)

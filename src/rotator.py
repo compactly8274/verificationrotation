@@ -17,7 +17,7 @@ from typing import Optional
 from src.bitwarden import sync_bitwarden
 from src.env_manager import read_env, write_env
 from src.notifications import send_notification
-from src.scanner import ScanIndex, _key_matches, _key_replace, _ssh, _validate_db_ref, build_scan_index
+from src.scanner import ScanIndex, _BOUNDARY_ESCAPED, _key_matches, _key_replace, _ssh, _validate_db_ref, build_scan_index
 from src.services_registry import ServiceDef
 
 logger = logging.getLogger("verificationrotation")
@@ -220,7 +220,7 @@ data = json.load(sys.stdin)
 sys.stdin.close()
 OLD = data["old"]
 NEW = data["new"]
-PAT = re.compile(r'(?<![A-Za-z0-9_\\-./])' + re.escape(OLD) + r'(?![A-Za-z0-9_\\-./])')
+PAT = re.compile(data["boundary"].format(re.escape(OLD)))
 for fp_str in data["files"]:
     fp = pathlib.Path(fp_str)
     try:
@@ -233,7 +233,7 @@ for fp_str in data["files"]:
     except OSError as e:
         print(f'WARNING: {e}')
 """
-    stdin_data = json.dumps({"old": old, "new": new, "files": filepaths})
+    stdin_data = json.dumps({"old": old, "new": new, "files": filepaths, "boundary": _BOUNDARY_ESCAPED})
     rc, out, err = _ssh(host, user, f"python3 -c {shlex.quote(py)}", stdin_data=stdin_data)
     if rc != 0:
         print(f"  WARNING: remote file replace on {host} failed: {err or 'ssh error'}")
@@ -251,7 +251,7 @@ data = json.load(sys.stdin)
 sys.stdin.close()
 OLD = data["old"]
 NEW = data["new"]
-PAT = re.compile(r'(?<![A-Za-z0-9_\\-./])' + re.escape(OLD) + r'(?![A-Za-z0-9_\\-./])')
+PAT = re.compile(data["boundary"].format(re.escape(OLD)))
 seen = set()
 for db_path, table, col in data["db_refs"]:
     key = (db_path, table, col)
@@ -278,7 +278,7 @@ for db_path, table, col in data["db_refs"]:
     except Exception as e:
         print(f'WARNING: {e}')
 """
-    stdin_data = json.dumps({"old": old, "new": new, "db_refs": [list(r) for r in db_refs]})
+    stdin_data = json.dumps({"old": old, "new": new, "db_refs": [list(r) for r in db_refs], "boundary": _BOUNDARY_ESCAPED})
     rc, out, err = _ssh(host, user, f"python3 -c {shlex.quote(py)}", stdin_data=stdin_data)
     if rc != 0:
         print(f"  WARNING: remote DB replace on {host} failed: {err or 'ssh error'}")

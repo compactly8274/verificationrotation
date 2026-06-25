@@ -35,8 +35,8 @@ _STRUCTURED_EXTS = {
     ".json", ".yaml", ".yml", ".toml", ".ini", ".conf", ".cfg", ".xml",
 }
 _XML_FILENAMES = {"config.xml", "serverconfig.xml"}
-_MAX_FILE_BYTES = 4 * 1024 * 1024  # 4 MB
-_MAX_DEPTH = 8
+_MAX_FILE_BYTES = 2 * 1024 * 1024  # 2 MB
+_MAX_DEPTH = 10
 
 
 @dataclass
