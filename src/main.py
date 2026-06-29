@@ -295,6 +295,13 @@ async def lifespan(app: FastAPI):
         run_date=datetime.now() + timedelta(seconds=5),
         id="initial_scan",
     )
+    scheduler.add_job(
+        _background_detect_paths, "interval",
+        hours=6,
+        id="detect_paths",
+        replace_existing=True,
+        next_run_time=datetime.now() + timedelta(seconds=15),
+    )
     yield
     scheduler.shutdown()
 
@@ -386,7 +393,7 @@ def _db_host_to_dict(row: RemoteHost) -> dict:
         "user": row.user,
         "search_dirs": json.loads(row.search_dirs) if row.search_dirs else [],
         "db_refs": [tuple(r) for r in json.loads(row.db_refs)] if row.db_refs else [],
-        "key_path": get_ssh_key(row.ssh_key_name) if row.ssh_key_name else None,
+        "key_path": (lambda kp: str(kp) if kp is not None else None)(get_ssh_key(row.ssh_key_name) if row.ssh_key_name else None),
     }
 
 
@@ -435,6 +442,59 @@ async def _seed_services():
 
 
 # ---------------------------------------------------------------------------
+# Background path detection
+# ---------------------------------------------------------------------------
+
+async def _background_detect_paths():
+    """Periodically walk /mnt/user/appdata and sync detected config paths into the DB."""
+    import src.path_discovery as pd
+    loop = asyncio.get_running_loop()
+    old_depth = pd.MAX_DEPTH
+    try:
+        pd.MAX_DEPTH = 4
+        detected = await loop.run_in_executor(
+            None,
+            lambda: pd.detect_service_paths(["/mnt/user/appdata"]),
+        )
+    finally:
+        pd.MAX_DEPTH = old_depth
+
+    refreshed = 0
+    async with async_session() as session:
+        rows = (await session.execute(select(Service))).scalars().all()
+        existing = {r.id: r for r in rows}
+        for sid, config_path in detected.items():
+            sig = APP_SIGNATURES.get(sid, {})
+            fmt = sig.get("format")
+            if sid not in existing:
+                def _guess_env_var(sid: str, sig: dict) -> str:
+                    if sig.get("format") == "env" and sig.get("env_key"):
+                        return sig["env_key"]
+                    if sig.get("format") == "yaml":
+                        yp = sig.get("yaml_path", [])
+                        return str(yp[-1]).upper() if yp else f"{sid.upper()}_KEY"
+                    return f"{sid.upper()}_API_KEY"
+                session.add(Service(
+                    id=sid,
+                    display_name=sig.get("docker_name", sid),
+                    env_var=_guess_env_var(sid, sig),
+                    is_password=1,
+                    detected_config_path=config_path,
+                    detected_config_format=fmt,
+                ))
+            else:
+                await session.execute(
+                    update(Service).where(Service.id == sid).values(
+                        detected_config_path=config_path,
+                        detected_config_format=fmt,
+                    )
+                )
+            refreshed += 1
+        await session.commit()
+    if refreshed:
+        logger.info("detect-paths: refreshed %d service path(s)", refreshed)
+
+
 # Background scan
 # ---------------------------------------------------------------------------
 
@@ -1598,6 +1658,42 @@ async def api_discover_keys(
             logger.warning("discover-keys: remote scan of %s timed out", rh.get("host", "?"))
         except Exception as exc:
             logger.warning("discover-keys: remote scan of %s failed: %s", rh.get("host", "?"), exc)
+
+    # Step 1.5 — signature dispatch: pull values from detected config paths
+    # for services that weren't found by the file-content scanner above.
+    try:
+        from src.models import Service as _ServiceModel
+        from src.path_discovery import parse_value_from_config as _pvc
+        from sqlalchemy import select as _select
+        async with async_session() as _sess:
+            _sig_rows = (await _sess.execute(
+                _select(_ServiceModel).where(
+                    _ServiceModel.detected_config_path.isnot(None),
+                    _ServiceModel.env_var.isnot(None),
+                )
+            )).scalars().all()
+        already = {r.service_id for r in results}
+        sig_added = 0
+        for _row in _sig_rows:
+            if _row.id in already:
+                continue
+            val = _pvc(_row.detected_config_path, _row.id)
+            if not val or len(str(val)) < 8:
+                continue
+            results.append(type("R", (), {
+                "service_id": _row.id,
+                "env_var": _row.env_var,
+                "display_name": _row.display_name or _row.id,
+                "value": val,
+                "source_file": _row.detected_config_path,
+                "confidence": "high",
+                "strategy": "signature",
+            })())
+            sig_added += 1
+        if sig_added:
+            logger.info("discover-keys: signature dispatch added %d value(s) for detected paths", sig_added)
+    except Exception as _exc:
+        logger.warning("discover-keys: signature dispatch failed: %s", _exc)
 
     async with async_session() as session:
         stored = await upsert_discovered_keys(session, results)
