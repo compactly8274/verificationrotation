@@ -32,14 +32,29 @@ _PRUNE = {
 # Suffixes/names that identify backup copies — skip so live configs win.
 _BACKUP_KEYWORDS = frozenset({"backup", "bak", "old", "config-backup"})
 
+# Matches ISO-date/timestamp and snapshot suffixes: -20240101T120000Z, -2024-01-01-120000,
+# -snapshot-anything, -archived-anything, or any name containing "archived".
+_BACKUP_TS_RE = re.compile(
+    r"(-archived-[^/]*"
+    r"|-\d{4}-\d{2}-\d{2}-\d{6}"
+    r"|-\d{8}T\d{6}Z?"
+    r"|-snapshot-[^/]*"
+    r")$",
+    re.IGNORECASE,
+)
+
 
 def _is_backup_dir(name: str) -> bool:
     """Return True if a directory name looks like a backup copy."""
     lo = name.lower()
-    return lo in _BACKUP_KEYWORDS or any(
+    if "archived" in lo:
+        return True
+    if lo in _BACKUP_KEYWORDS or any(
         lo.endswith(f"-{kw}") or lo.endswith(f"_{kw}") or lo.endswith(f".{kw}")
         for kw in _BACKUP_KEYWORDS
-    )
+    ):
+        return True
+    return bool(_BACKUP_TS_RE.search(lo))
 
 # Remote scan script — executed on the remote host via "python3 -c <script>".
 # Must contain NO literal single-quote characters (shlex.quote wraps in single quotes).
@@ -138,6 +153,20 @@ for base in search_dirs:
                                 el = root_el.find(f".//{xtag}")
                                 if el is not None and el.text:
                                     value = el.text.strip()
+                            elif fmt == "sqlite":
+                                import sqlite3 as _sq
+                                tbl = sig.get("sqlite_table", "")
+                                col = sig.get("sqlite_column", "")
+                                whr = sig.get("sqlite_where", "")
+                                db_uri = "file:" + str(cpath) + "?mode=ro"
+                                con2 = _sq.connect(db_uri, uri=True, timeout=5)
+                                try:
+                                    qry = ("SELECT " + col + " FROM " + tbl + " WHERE " + whr) if whr else ("SELECT " + col + " FROM " + tbl + " LIMIT 1")
+                                    row2 = con2.execute(qry).fetchone()
+                                    if row2 and row2[0] is not None:
+                                        value = str(row2[0])
+                                finally:
+                                    con2.close()
                         except Exception:
                             pass
                         found[sid] = {"path": str(cpath), "value": value}
@@ -336,6 +365,20 @@ def parse_value_from_config(config_path: str, service_id: str) -> Optional[str]:
             ekey = sig.get("env_key", "")
             m = re.search(r"^" + re.escape(ekey) + r"\s*=\s*(.+)$", text, re.MULTILINE)
             return m.group(1).strip().strip("'\"") if m else None
+        if fmt == "sqlite":
+            import sqlite3 as _sql
+            db_path = str(path)
+            table = sig.get("sqlite_table", "")
+            column = sig.get("sqlite_column", "")
+            where = sig.get("sqlite_where", "")
+            uri = f"file:{db_path}?mode=ro"
+            con = _sql.connect(uri, uri=True, timeout=5)
+            try:
+                q = f"SELECT {column} FROM {table} WHERE {where}" if where else f"SELECT {column} FROM {table} LIMIT 1"
+                row = con.execute(q).fetchone()
+                return str(row[0]) if row and row[0] is not None else None
+            finally:
+                con.close()
     except Exception as exc:
         import logging as _l
         _l.getLogger(__name__).warning(

@@ -124,6 +124,40 @@ def _xml_tag_write(path: str, tag: str) -> Callable[[str], bool]:
     return _write
 
 
+def _sqlite_read(path: str, table: str, column: str, where: str = "") -> Callable[[], Optional[str]]:
+    def _read() -> Optional[str]:
+        import sqlite3 as _sql
+        try:
+            uri = f"file:{path}?mode=ro"
+            con = _sql.connect(uri, uri=True, timeout=5)
+            try:
+                q = f"SELECT {column} FROM {table} WHERE {where}" if where else f"SELECT {column} FROM {table} LIMIT 1"
+                row = con.execute(q).fetchone()
+                return str(row[0]) if row and row[0] is not None else None
+            finally:
+                con.close()
+        except Exception:
+            return None
+    return _read
+
+
+def _sqlite_write(path: str, table: str, column: str, where: str = "") -> Callable[[str], bool]:
+    def _write(new_value: str) -> bool:
+        import sqlite3 as _sql
+        try:
+            con = _sql.connect(path, timeout=10)
+            try:
+                q = f"UPDATE {table} SET {column}=?" + (f" WHERE {where}" if where else "")
+                con.execute(q, (new_value,))
+                con.commit()
+                return True
+            finally:
+                con.close()
+        except Exception:
+            return False
+    return _write
+
+
 def _build_auto_fetch(cfg: Optional[dict]) -> Optional[Callable[[], Optional[str]]]:
     if not cfg:
         return None
@@ -133,6 +167,11 @@ def _build_auto_fetch(cfg: Optional[dict]) -> Optional[Callable[[], Optional[str
         return _arr_xml(path)
     if t == "xml_tag":
         return _xml_tag(path, cfg.get("tag", "ApiKey"))
+    if t == "sqlite":
+        return _sqlite_read(path, cfg.get("table", ""), cfg.get("column", ""), cfg.get("where", ""))
+    if t == "env_file":
+        from src.config_io import read_env_file
+        return lambda: read_env_file(path, cfg.get("env_key", ""))
     return None
 
 
@@ -146,6 +185,12 @@ def _build_auto_write(cfg: Optional[dict]) -> Optional[Callable[[str], bool]]:
         return _arr_xml_write(path)
     if t == "xml_tag":
         return _xml_tag_write(path, cfg.get("tag", "ApiKey"))
+    if t == "sqlite":
+        return _sqlite_write(path, cfg.get("table", ""), cfg.get("column", ""), cfg.get("where", ""))
+    if t == "env_file":
+        from src.config_io import write_env_file
+        env_key = cfg.get("env_key", "")
+        return lambda new: write_env_file(path, env_key, new)
     return None
 
 
